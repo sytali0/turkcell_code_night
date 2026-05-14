@@ -12,7 +12,10 @@ function useTimer(totalSeconds, onExpire) {
   const ref = useRef(null);
 
   useEffect(() => {
-    if (totalSeconds <= 0) return;
+    if (totalSeconds <= 0) {
+      setRemaining(0);
+      return;
+    }
     setRemaining(totalSeconds);
     ref.current = setInterval(() => {
       setRemaining((prev) => {
@@ -31,6 +34,14 @@ function useTimer(totalSeconds, onExpire) {
   const pct = totalSeconds > 0 ? (remaining / totalSeconds) * 100 : 100;
   const urgent = remaining <= 60 && totalSeconds > 0;
   return { display: fmt(remaining), pct, urgent };
+}
+
+function getRemainingSeconds(session) {
+  const total = (session?.time_limit_min ?? 0) * 60;
+  if (total <= 0) return 0;
+  const startedAt = session?.started_at ? new Date(session.started_at).getTime() : Date.now();
+  const elapsed = Math.max(Math.floor((Date.now() - startedAt) / 1000), 0);
+  return Math.max(total - elapsed, 0);
 }
 
 // ── Soru tip ikonları ──────────────────────────────────────────────────────
@@ -237,11 +248,12 @@ export default function ExamPage() {
   const [submitError, setSubmitError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [flagged, setFlagged] = useState(new Set());
+  const submittedRef = useRef(false);
 
   // Timer
-  const timeLimitSec = (session?.time_limit_min ?? 0) * 60;
+  const timeLimitSec = phase === 'started' ? getRemainingSeconds(session) : 0;
   const { display: timerDisplay, pct: timerPct, urgent: timerUrgent } = useTimer(
-    phase === 'started' ? timeLimitSec : 0,
+    timeLimitSec,
     () => phase === 'started' && handleSubmit(true),
   );
 
@@ -249,6 +261,9 @@ export default function ExamPage() {
   const loadExam = useCallback(async () => {
     setPhase('loading');
     setError('');
+    submittedRef.current = false;
+    setAnswers({});
+    setCurrentQ(0);
     try {
       const res = await examAPI.start(examId);
       setSession(prepareExamSession(res.data));
@@ -282,7 +297,8 @@ export default function ExamPage() {
 
   // ── Gönder ──
   const handleSubmit = async (autoSubmit = false) => {
-    if (submitting) return;
+    if (submitting || submittedRef.current || !session) return;
+    submittedRef.current = true;
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -299,6 +315,7 @@ export default function ExamPage() {
     } catch (err) {
       const msg = err.response?.data?.detail;
       setSubmitError(typeof msg === 'string' ? msg : 'Gönderme başarısız. Tekrar deneyin.');
+      submittedRef.current = false;
       setSubmitting(false);
     }
   };
@@ -362,7 +379,7 @@ export default function ExamPage() {
             { icon: BookOpen, label: 'Soru Sayısı', val: `${questions.length} soru` },
             { icon: Clock, label: 'Süre', val: session?.time_limit_min > 0 ? `${session.time_limit_min} dakika` : 'Süresiz' },
             { icon: CheckCircle2, label: 'Geçme Notu', val: `%${session?.passing_score ?? 70}` },
-            { icon: Trophy, label: 'Deneme', val: `${session?.attempt_no ?? 1}. deneme` },
+            { icon: Trophy, label: 'Deneme', val: `${session?.attempt_no ?? 1}/${session?.max_attempts ?? 3}` },
           ].map(({ icon: Icon, label, val }) => (
             <div key={label} className="card" style={{ padding: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
               <Icon size={18} color="var(--tc-yellow)" />

@@ -90,10 +90,14 @@ class ExamSessionResponse(BaseModel):
     attempt_id: str
     exam_id: str
     exam_title: str
+    attempt_no: int = 1
     time_limit_min: int
     duration_minutes: int
     total_questions: int
     total_points: float
+    max_attempts: int = 3
+    attempts_used: int = 0
+    remaining_attempts: int = 0
     passing_score: float = Field(..., description="Geçme notu (0-100)")
     questions: List[QuestionSafe] = Field(..., description="Karıştırılmış sorular — cevaplar gizli")
     started_at: str
@@ -120,6 +124,7 @@ class AnswerItem(BaseModel):
 
 
 class ExamSubmitRequest(BaseModel):
+    attempt_id: Optional[str] = Field(default=None, description="Aktif deneme ID'si")
     """POST /exams/{id}/submit istek gövdesi."""
     answers: List[AnswerItem] = Field(..., description="Tüm cevaplar")
 
@@ -140,6 +145,8 @@ class AnswerResult(BaseModel):
     max_points: float
     selected_choices: List[str]
     correct_choices: List[str]
+    selected_choice_texts: List[str] = Field(default_factory=list)
+    correct_choice_texts: List[str] = Field(default_factory=list)
     explanation: Optional[str] = None
 
 
@@ -163,6 +170,12 @@ class ExamSubmitResponse(BaseModel):
     attempt_id: str
     score: float
     is_passed: bool
+    passing_score: float
+    attempt_no: int
+    best_score: float
+    attempts_used: int
+    max_attempts: int
+    remaining_attempts: int
     correct_count: int
     wrong_count: int
     breakdown: dict[str, Any]
@@ -182,6 +195,11 @@ class ExamResultResponse(BaseModel):
     score: float
     is_passed: bool
     passed: bool
+    passing_score: float
+    best_score: float
+    attempts_used: int
+    max_attempts: int
+    remaining_attempts: int
     attempt_no: int
     started_at: str
     finished_at: Optional[str] = None
@@ -193,6 +211,47 @@ class ExamResultResponse(BaseModel):
     certificate_number: Optional[str] = None
     completed_at: str
     answers: List[AnswerResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Yonetim Modelleri (Egitmen/Admin)
+# ---------------------------------------------------------------------------
+
+
+class ExamUpsertRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    time_limit_min: int = Field(..., ge=1)
+    passing_score: int = Field(default=60, ge=0, le=100)
+    question_count: int = Field(default=1, ge=1)
+    shuffle: bool = False
+    max_attempts: int = Field(default=3, ge=1)
+
+
+class ExamPatchRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    time_limit_min: Optional[int] = Field(default=None, ge=1)
+    passing_score: Optional[int] = Field(default=None, ge=0, le=100)
+    question_count: Optional[int] = Field(default=None, ge=1)
+    shuffle: Optional[bool] = None
+    max_attempts: Optional[int] = Field(default=None, ge=1)
+
+
+class QuestionOptionInput(BaseModel):
+    id: Optional[str] = None
+    text: str = Field(..., min_length=1)
+    is_correct: bool = False
+
+
+class QuestionUpsertRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    type: Optional[str] = None
+    question_type: Optional[str] = None
+    order_index: int = Field(default=1, ge=1)
+    options: List[QuestionOptionInput] = Field(default_factory=list)
+    points: float = Field(default=1.0, gt=0)
+    explanation: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

@@ -50,7 +50,16 @@ export const authAPI = {
 // ── Course endpoints ───────────────────────────────────────────────────────
 export const courseAPI = {
   list:       (params) => api.get('/courses/', { params }),
+  detail:     (courseId) => api.get(`/courses/${courseId}`),
   enroll:     (courseId) => api.post(`/courses/${courseId}/enroll`),
+  myEnrollments: () => api.get('/courses/my-enrollments'),
+  instructorCourses: () => api.get('/courses/instructor/mine'),
+  adminCourses: (params) => api.get('/courses/admin/all', { params }),
+  create:     (data) => api.post('/courses/', data),
+  update:     (courseId, data) => api.patch(`/courses/${courseId}`, data),
+  updateStatus: (courseId, status) => api.patch(`/courses/${courseId}/status`, { status }),
+  createModule: (courseId, data) => api.post(`/courses/${courseId}/modules`, data),
+  createLesson: (moduleId, data) => api.post(`/modules/${moduleId}/lessons`, data),
   curriculum: (courseId) => api.get(`/courses/${courseId}/curriculum`),
   rate:       (courseId, data) => api.post(`/courses/${courseId}/rate`, data),
 };
@@ -66,6 +75,15 @@ export const examAPI = {
   start:  (examId) => api.post(`/exams/${examId}/start`),
   submit: (examId, data) => api.post(`/exams/${examId}/submit`, data),
   result: (examId) => api.get(`/exams/${examId}/result`),
+  moduleExam: (moduleId) => api.get(`/modules/${moduleId}/exam`),
+  createForModule: (moduleId, data) => api.post(`/modules/${moduleId}/exam`, data),
+  update: (examId, data) => api.patch(`/exams/${examId}`, data),
+  delete: (examId) => api.delete(`/exams/${examId}`),
+  questions: (examId) => api.get(`/exams/${examId}/questions`),
+  createQuestion: (examId, data) => api.post(`/exams/${examId}/questions`, data),
+  updateQuestion: (questionId, data) => api.patch(`/questions/${questionId}`, data),
+  deleteQuestion: (questionId) => api.delete(`/questions/${questionId}`),
+  adminStats: () => api.get('/admin/exams'),
 };
 
 export default api;

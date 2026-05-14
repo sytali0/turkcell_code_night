@@ -260,7 +260,9 @@ export default function CourseCatalogPage() {
   const [search, setSearch] = useState('');
   const [selectedLevel, setSelectedLevel] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
+  const [selectedInstructor, setSelectedInstructor] = useState('');
   const [categories, setCategories] = useState([]);
+  const [instructors, setInstructors] = useState([]);
 
   // enrolledIds: hangi kurslara kayıtlıyız (session içinde tutuluyor)
   const [enrolledIds, setEnrolledIds] = useState(() => {
@@ -278,25 +280,50 @@ export default function CourseCatalogPage() {
       const params = {};
       if (selectedLevel) params.level = selectedLevel;
       if (selectedCategory) params.category = selectedCategory;
+      if (selectedInstructor) params.instructor = selectedInstructor;
 
       const res = await courseAPI.list(params);
       const list = res.data.courses || [];
       setCourses(list);
+      const enrolledFromApi = list.filter((c) => c.enrolled).map((c) => c.id);
+      if (enrolledFromApi.length > 0) {
+        setEnrolledIds((prev) => {
+          const updated = new Set([...prev, ...enrolledFromApi]);
+          sessionStorage.setItem('enrolled_courses', JSON.stringify([...updated]));
+          return updated;
+        });
+      }
 
       // Unique kategorileri çıkar
       const cats = [...new Set(list.map((c) => c.category).filter(Boolean))];
       setCategories(cats);
+      const names = [...new Set(list.map((c) => c.instructor_name || c.instructor).filter(Boolean))];
+      setInstructors(names);
     } catch (err) {
       const msg = err.response?.data?.detail || 'Kurslar yüklenirken hata oluştu.';
       setError(typeof msg === 'string' ? msg : 'Sunucuya bağlanılamadı.');
     } finally {
       setLoading(false);
     }
-  }, [selectedLevel, selectedCategory]);
+  }, [selectedLevel, selectedCategory, selectedInstructor]);
 
   useEffect(() => {
     fetchCourses();
   }, [fetchCourses]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await courseAPI.myEnrollments();
+        const ids = (res.data.courses || []).map((course) => course.id);
+        const updated = new Set(ids);
+        setEnrolledIds(updated);
+        sessionStorage.setItem('enrolled_courses', JSON.stringify([...updated]));
+      } catch {
+        // Katalog çalışmaya devam etsin; kayıt bilgisi list endpointinden de gelebilir.
+      }
+    })();
+  }, []);
 
   // ── Kayıt / Kursa git ──
   const handleEnroll = async (courseId, alreadyEnrolled) => {
@@ -352,7 +379,7 @@ export default function CourseCatalogPage() {
     );
   });
 
-  const hasFilters = !!(search || selectedLevel || selectedCategory);
+  const hasFilters = !!(search || selectedLevel || selectedCategory || selectedInstructor);
 
   return (
     <div style={{ minHeight: 'calc(100vh - 64px)', background: 'var(--tc-bg)' }}>
@@ -478,10 +505,33 @@ export default function CourseCatalogPage() {
             </select>
           )}
 
+          {instructors.length > 0 && (
+            <select
+              value={selectedInstructor}
+              onChange={(e) => setSelectedInstructor(e.target.value)}
+              style={{
+                background: 'var(--tc-surface)',
+                border: '1px solid var(--tc-border)',
+                color: selectedInstructor ? 'var(--tc-text)' : 'var(--tc-muted)',
+                fontSize: '0.82rem',
+                padding: '0.45rem 0.9rem',
+                borderRadius: '8px',
+                outline: 'none',
+                cursor: 'pointer',
+                fontFamily: 'Inter, sans-serif',
+              }}
+            >
+              <option value="" style={{ background: '#1a2235' }}>Tüm Eğitmenler</option>
+              {instructors.map((name) => (
+                <option key={name} value={name} style={{ background: '#1a2235' }}>{name}</option>
+              ))}
+            </select>
+          )}
+
           {/* Aktif filtre sayısı */}
           {hasFilters && (
             <button
-              onClick={() => { setSearch(''); setSelectedLevel(''); setSelectedCategory(''); }}
+              onClick={() => { setSearch(''); setSelectedLevel(''); setSelectedCategory(''); setSelectedInstructor(''); }}
               className="btn-ghost"
               style={{ fontSize: '0.78rem', padding: '0.4rem 0.75rem' }}
             >
@@ -577,7 +627,7 @@ export default function CourseCatalogPage() {
             {filteredCourses.length === 0 ? (
               <EmptyState
                 hasFilters={hasFilters}
-                onReset={() => { setSearch(''); setSelectedLevel(''); setSelectedCategory(''); }}
+                onReset={() => { setSearch(''); setSelectedLevel(''); setSelectedCategory(''); setSelectedInstructor(''); }}
               />
             ) : (
               filteredCourses.map((course, idx) => (

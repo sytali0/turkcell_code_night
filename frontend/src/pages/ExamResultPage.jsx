@@ -36,6 +36,9 @@ function AnswerCard({ item, index }) {
   const [open, setOpen] = useState(false);
   const correct = item.is_correct;
   const partial = !correct && item.earned_points > 0;
+  const selectedTexts = item.selected_choice_texts?.length ? item.selected_choice_texts : item.selected_choices;
+  const correctTexts = item.correct_choice_texts?.length ? item.correct_choice_texts : item.correct_choices;
+  item = { ...item, selected_choices: selectedTexts, correct_choices: correctTexts };
 
   return (
     <div
@@ -71,12 +74,12 @@ function AnswerCard({ item, index }) {
           {item.question_text && (
             <p style={{ fontSize: '0.85rem', color: 'var(--tc-text)', lineHeight: 1.5 }}>{item.question_text}</p>
           )}
-          {item.selected_choices?.length > 0 && (
+          {selectedTexts?.length > 0 && (
             <p style={{ fontSize: '0.78rem', color: 'var(--tc-muted)' }}>
               <span style={{ fontWeight: 600 }}>Cevabınız:</span> {item.selected_choices.join(', ')}
             </p>
           )}
-          {item.correct_choices?.length > 0 && !correct && (
+          {correctTexts?.length > 0 && !correct && (
             <p style={{ fontSize: '0.78rem', color: '#4ADE80' }}>
               <span style={{ fontWeight: 600 }}>Doğru cevap:</span> {item.correct_choices.join(', ')}
             </p>
@@ -151,9 +154,13 @@ export default function ExamResultPage() {
 
   const score = result.score ?? 0;
   const passed = result.is_passed ?? (score >= (result.passing_score ?? 70));
-  const answers = result.answers ?? [];
-  const totalQ = answers.length || result.question_count || 0;
-  const correctCount = answers.filter((a) => a.is_correct).length;
+  const answers = result.answers ?? result.per_question_results ?? [];
+  const reportedTotalQ = result.total_questions ?? result.score_breakdown?.total_questions ?? result.breakdown?.total_questions ?? answers.length ?? result.question_count ?? 0;
+  const correctCount = result.correct_count ?? answers.filter((a) => a.is_correct).length;
+  const blankCount = result.blank_count ?? result.score_breakdown?.blank_count ?? result.breakdown?.blank_count ?? 0;
+  const wrongCount = result.wrong_count ?? Math.max(reportedTotalQ - correctCount - blankCount, 0);
+  const totalQ = correctCount + wrongCount;
+  const canRetry = !passed && (result.remaining_attempts ?? 1) > 0;
 
   return (
     <div style={{ minHeight: 'calc(100vh - 64px)', background: 'var(--tc-bg)', padding: '2rem 1.5rem' }}>
@@ -205,7 +212,7 @@ export default function ExamResultPage() {
           </div>
 
           {/* İstatistikler */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', maxWidth: '400px', margin: '0 auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', maxWidth: '420px', margin: '0 auto' }}>
             {[
               { icon: CheckCircle2, color: '#4ADE80', val: correctCount, label: 'Doğru' },
               { icon: XCircle, color: '#F87171', val: totalQ - correctCount, label: 'Yanlış' },
@@ -218,6 +225,10 @@ export default function ExamResultPage() {
               </div>
             ))}
           </div>
+
+          <p style={{ color: 'var(--tc-muted)', fontSize: '0.78rem', marginTop: '0.9rem' }}>
+            Boş soru: {blankCount} · Deneme: {result.attempt_no ?? '-'} / {result.max_attempts ?? '-'} · En yüksek puan: {Math.round(result.best_score ?? score)}
+          </p>
 
           {/* Sertifika */}
           {passed && result.certificate_number && (
@@ -236,7 +247,7 @@ export default function ExamResultPage() {
           <button onClick={() => navigate('/')} className="btn-secondary" style={{ flex: 1 }}>
             <BookOpen size={15} /> Kataloğa Dön
           </button>
-          {!passed && (
+          {canRetry && (
             <button onClick={() => navigate(`/exams/${examId}`)} className="btn-primary" style={{ flex: 1 }}>
               <RotateCcw size={15} /> Tekrar Dene
             </button>

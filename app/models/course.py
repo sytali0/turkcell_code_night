@@ -60,6 +60,9 @@ class LessonResponse(LessonBase):
     """Ders detay cevabı."""
     id:    str = Field(..., examples=["les_001"])
     order: int = Field(..., ge=1, examples=[1])
+    content: str = Field(default="")
+    estimatedDuration: int = Field(default=0)
+    orderIndex: int = Field(default=1)
 
     model_config = {"from_attributes": True}
 
@@ -113,6 +116,9 @@ class ModuleResponse(ModuleBase):
     total_duration: int              = Field(..., ge=0, description="Modüldeki toplam süre (dakika)")
     lessons:        list[LessonResponse] = Field(default_factory=list)
     exams:          list[ExamResponse] = Field(default_factory=list)
+    is_locked:      bool = False
+    is_unlocked:    bool = True
+    lock_reason:    Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -140,6 +146,14 @@ class CourseListItem(BaseModel):
     is_free:       bool          = Field(default=False)
     price_tl:      Optional[float] = Field(default=None, examples=[299.0])
     tags:          list[str]     = Field(default_factory=list)
+    status:        str           = Field(default="published")
+    instructor_id: str           = Field(default="")
+    instructorId:  str           = Field(default="")
+    coverImageUrl: str           = Field(default="")
+    estimatedDuration: int       = Field(default=0)
+    createdAt:     Optional[str] = None
+    updatedAt:     Optional[str] = None
+    enrolled:      bool          = False
 
     model_config = {"from_attributes": True}
 

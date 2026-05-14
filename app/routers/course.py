@@ -72,6 +72,161 @@ class CommentResponse(BaseModel):
     content: str
     created_at: str
 
+
+VALID_COURSE_STATUSES = {"draft", "published", "archived"}
+
+
+class UpdateCourseRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, min_length=1)
+    category: Optional[str] = Field(default=None, min_length=1)
+    level: Optional[str] = Field(default=None, pattern="^(beginner|intermediate|advanced)$")
+    cover_image_url: Optional[str] = Field(default=None)
+    coverImageUrl: Optional[str] = Field(default=None)
+    estimated_duration_min: Optional[int] = Field(default=None, ge=1)
+    estimatedDuration: Optional[int] = Field(default=None, ge=1)
+    status: Optional[str] = Field(default=None, pattern="^(draft|published|archived)$")
+
+
+class CourseStatusRequest(BaseModel):
+    status: str = Field(..., pattern="^(draft|published|archived)$")
+
+
+class CreateModuleRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1)
+    order_index: int = Field(..., ge=1)
+
+
+class CreateLessonRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1)
+    estimated_duration_min: int = Field(..., ge=1)
+    order_index: int = Field(..., ge=1)
+
+
+def _parse_uuid(value: str, resource_name: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"'{value}' ID'li {resource_name} bulunamadı.")
+
+
+def _require_role(user: User, *roles: str) -> None:
+    if user.role not in roles:
+        raise HTTPException(status_code=403, detail="Bu işlem için yetkiniz yok.")
+
+
+def _require_owner_or_admin(course: Course, user: User) -> None:
+    if user.role != "admin" and course.instructor_id != user.id:
+        raise HTTPException(status_code=403, detail="Bu kursu yönetme yetkiniz yok.")
+
+
+def _course_student_count(db: Session, course_id: UUID) -> int:
+    return db.scalar(
+        select(func.count()).select_from(Enrollment).where(Enrollment.course_id == course_id)
+    ) or 0
+
+
+def _course_enrolled(db: Session, course_id: UUID, user: Optional[User]) -> bool:
+    if user is None:
+        return False
+    return bool(
+        db.scalar(
+            select(Enrollment.id).where(
+                Enrollment.course_id == course_id,
+                Enrollment.user_id == user.id,
+            )
+        )
+    )
+
+
+def _course_to_item(
+    db: Session,
+    course: Course,
+    instructor_name: str,
+    current_user: Optional[User] = None,
+) -> CourseListItem:
+    duration_min = course.estimated_duration_min or 0
+    return CourseListItem(
+        id=str(course.id),
+        title=course.title,
+        description=course.description or "",
+        cover_url=course.cover_image_url or "",
+        coverImageUrl=course.cover_image_url or "",
+        category=course.category or "",
+        level=course.level,
+        instructor=instructor_name,
+        instructor_name=instructor_name,
+        instructor_id=str(course.instructor_id),
+        instructorId=str(course.instructor_id),
+        rating=0.0,
+        student_count=_course_student_count(db, course.id),
+        duration_hours=round(duration_min / 60, 2),
+        estimatedDuration=duration_min,
+        is_free=True,
+        price_tl=None,
+        tags=[],
+        status=course.status,
+        createdAt=course.created_at.isoformat() if course.created_at else None,
+        updatedAt=course.updated_at.isoformat() if course.updated_at else None,
+        enrolled=_course_enrolled(db, course.id, current_user),
+    )
+
+
+def _course_row_to_item(
+    db: Session,
+    row: tuple[Course, str],
+    current_user: Optional[User] = None,
+) -> CourseListItem:
+    course, instructor_name = row
+    return _course_to_item(db, course, instructor_name, current_user)
+
+
+def _get_course_with_instructor(db: Session, course_id: UUID) -> tuple[Course, str] | None:
+    return db.execute(
+        select(Course, User.full_name.label("instructor_name"))
+        .join(User, Course.instructor_id == User.id)
+        .where(Course.id == course_id)
+    ).one_or_none()
+
+
+def _course_payload(db: Session, course: Course, instructor_name: str, current_user: Optional[User] = None) -> dict:
+    item = _course_to_item(db, course, instructor_name, current_user)
+    return item.model_dump(mode="json")
+
+
+def _module_lock_state(
+    db: Session,
+    modules: list[Module],
+    module_index: int,
+    current_user: Optional[User],
+) -> tuple[bool, bool, Optional[str]]:
+    if current_user is None or current_user.role != "student":
+        return False, True, None
+
+    for previous_module in modules[:module_index]:
+        previous_exams = list(
+            db.scalars(select(Exam).where(Exam.module_id == previous_module.id)).all()
+        )
+        if not previous_exams:
+            continue
+
+        passed = db.scalar(
+            select(ExamAttempt.id)
+            .where(
+                ExamAttempt.user_id == current_user.id,
+                ExamAttempt.exam_id.in_([exam.id for exam in previous_exams]),
+                ExamAttempt.finished_at.isnot(None),
+                ExamAttempt.is_passed.is_(True),
+            )
+            .limit(1)
+        )
+        if passed is None:
+            return True, False, "Önceki modül sınavını geçmeden bu modüle erişemezsiniz."
+
+    return False, True, None
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/courses
 # ---------------------------------------------------------------------------
@@ -84,6 +239,10 @@ class CommentResponse(BaseModel):
 def list_courses(
     category: Optional[str] = Query(default=None),
     level: Optional[CourseLevel] = Query(default=None),
+    instructor: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    search: Optional[str] = Query(default=None),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> CourseListResponse:
     stmt = (
@@ -91,35 +250,31 @@ def list_courses(
         .join(User, Course.instructor_id == User.id)
         .order_by(Course.order_index, Course.created_at)
     )
+    if current_user is None or current_user.role == "student":
+        stmt = stmt.where(Course.status == "published")
+    elif status_filter:
+        stmt = stmt.where(Course.status == status_filter)
     if category:
         stmt = stmt.where(Course.category == category)
     if level:
         stmt = stmt.where(Course.level == level.value)
+    if instructor:
+        stmt = stmt.where(User.full_name.ilike(f"%{instructor}%"))
+    if search:
+        q = f"%{search}%"
+        stmt = stmt.where(
+            Course.title.ilike(q)
+            | Course.description.ilike(q)
+            | Course.category.ilike(q)
+            | User.full_name.ilike(q)
+        )
 
     try:
         rows = db.execute(stmt).all()
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=500, detail="Kurs listesi okunamadı.") from exc
 
-    courses = [
-        CourseListItem(
-            id=str(course.id),
-            title=course.title,
-            description=course.description or "",
-            cover_url=course.cover_image_url or "",
-            category=course.category or "",
-            level=course.level,
-            instructor=instructor_name,
-            instructor_name=instructor_name,
-            rating=0.0,
-            student_count=0,
-            duration_hours=round((course.estimated_duration_min or 0) / 60, 2),
-            is_free=True,
-            price_tl=None,
-            tags=[],
-        )
-        for course, instructor_name in rows
-    ]
+    courses = [_course_row_to_item(db, row, current_user) for row in rows]
     return CourseListResponse(total=len(courses), courses=courses)
 
 
@@ -145,9 +300,12 @@ def enroll_course(
         raise HTTPException(status_code=404, detail=f"'{course_id}' ID'li kurs bulunamadı.")
 
     try:
+        _require_role(current_user, "student")
         course = db.get(Course, course_uuid)
         if course is None:
             raise HTTPException(status_code=404, detail=f"'{course_id}' ID'li kurs bulunamadı.")
+        if course.status != "published":
+            raise HTTPException(status_code=400, detail="Sadece yayındaki kurslara kayıt olunabilir.")
 
         existing = db.scalar(
             select(Enrollment).where(
@@ -201,7 +359,7 @@ def enroll_course(
 )
 def get_curriculum(
     course_id: str = Path(...),
-    _current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> CourseCurriculumResponse:
     try:
@@ -220,6 +378,11 @@ def get_curriculum(
             raise HTTPException(status_code=404, detail=f"'{course_id}' ID'li kurs bulunamadı.")
 
         course, instructor_name = course_row
+        if course.status != "published":
+            if current_user is None or current_user.role == "student":
+                raise HTTPException(status_code=404, detail=f"'{course_id}' ID'li kurs bulunamadı.")
+            _require_owner_or_admin(course, current_user)
+
         modules = db.scalars(
             select(Module).where(Module.course_id == course.id).order_by(Module.order_index)
         ).all()
@@ -227,7 +390,7 @@ def get_curriculum(
         module_items = []
         total_lessons = 0
 
-        for module in modules:
+        for module_index, module in enumerate(modules):
             lessons = db.scalars(
                 select(Lesson).where(Lesson.module_id == module.id).order_by(Lesson.order_index)
             ).all()
@@ -243,6 +406,9 @@ def get_curriculum(
                     duration_minutes=lesson.estimated_duration_min or 1,
                     is_free_preview=lesson.order_index == 1,
                     order=lesson.order_index,
+                    content=lesson.content or "",
+                    estimatedDuration=lesson.estimated_duration_min or 0,
+                    orderIndex=lesson.order_index,
                 )
                 for lesson in lessons
             ]
@@ -276,6 +442,12 @@ def get_curriculum(
                     )
                 )
 
+            is_locked, is_unlocked, lock_reason = _module_lock_state(
+                db,
+                list(modules),
+                module_index,
+                current_user,
+            )
             total_lessons += len(lesson_items)
             module_items.append(
                 ModuleResponse(
@@ -287,6 +459,9 @@ def get_curriculum(
                     total_duration=sum(l.estimated_duration_min or 0 for l in lessons),
                     lessons=lesson_items,
                     exams=exam_items,
+                    is_locked=is_locked,
+                    is_unlocked=is_unlocked,
+                    lock_reason=lock_reason,
                 )
             )
 
@@ -305,12 +480,20 @@ def get_curriculum(
         level=course.level,
         instructor=instructor_name,
         instructor_name=instructor_name,
+        instructor_id=str(course.instructor_id),
+        instructorId=str(course.instructor_id),
         rating=0.0,
-        student_count=0,
+        student_count=_course_student_count(db, course.id),
         duration_hours=round(duration_min / 60, 2),
+        estimatedDuration=duration_min,
         is_free=True,
         price_tl=None,
         tags=[],
+        status=course.status,
+        coverImageUrl=course.cover_image_url or "",
+        createdAt=course.created_at.isoformat() if course.created_at else None,
+        updatedAt=course.updated_at.isoformat() if course.updated_at else None,
+        enrolled=_course_enrolled(db, course.id, current_user),
         module_count=len(module_items),
         total_lessons=total_lessons,
         modules=module_items,
@@ -492,11 +675,14 @@ def add_comment(
 
 class CreateCourseRequest(BaseModel):
     title: str = Field(..., min_length=3, max_length=200)
-    description: Optional[str] = Field(default=None)
-    category: Optional[str] = Field(default=None)
+    description: str = Field(..., min_length=1)
+    category: str = Field(..., min_length=1)
     level: str = Field(default="beginner", pattern="^(beginner|intermediate|advanced)$")
     cover_image_url: Optional[str] = Field(default=None)
+    coverImageUrl: Optional[str] = Field(default=None)
     estimated_duration_min: Optional[int] = Field(default=None, ge=1)
+    estimatedDuration: Optional[int] = Field(default=None, ge=1)
+    status: str = Field(default="draft", pattern="^(draft|published|archived)$")
 
 class CreateCourseResponse(BaseModel):
     success: bool = True
@@ -518,6 +704,9 @@ def create_course(
     db: Session = Depends(get_db),
 ) -> CreateCourseResponse:
     now = datetime.now()
+    _require_role(current_user, "instructor", "admin")
+    duration_min = body.estimated_duration_min or body.estimatedDuration
+    cover_url = body.cover_image_url or body.coverImageUrl
     # Her rol kurs oluşturabilir (hackathon kolaylığı)
     new_course = Course(
         id=uuid4(),
@@ -526,9 +715,9 @@ def create_course(
         description=body.description,
         category=body.category,
         level=body.level,
-        cover_image_url=body.cover_image_url,
-        estimated_duration_min=body.estimated_duration_min,
-        status="published",
+        cover_image_url=cover_url,
+        estimated_duration_min=duration_min,
+        status=body.status,
         order_index=1,
         created_at=now,
         updated_at=now,
@@ -689,6 +878,246 @@ def get_progress(
 # ===========================================================================
 
 cert_router = APIRouter(prefix="/certificates", tags=["🏆 Sertifikalar"])
+
+
+content_router = APIRouter(tags=["Kurs İçerik Yönetimi"])
+
+
+@content_router.get("/courses/my-enrollments")
+def get_my_enrollments(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "student")
+    rows = db.execute(
+        select(Enrollment, Course, User.full_name.label("instructor_name"))
+        .join(Course, Enrollment.course_id == Course.id)
+        .join(User, Course.instructor_id == User.id)
+        .where(Enrollment.user_id == current_user.id)
+        .order_by(Enrollment.enrolled_at.desc())
+    ).all()
+
+    courses = []
+    for enrollment, course, instructor_name in rows:
+        item = _course_to_item(db, course, instructor_name, current_user).model_dump(mode="json")
+        item["progress_percent"] = enrollment.progress_percent
+        item["enrolledAt"] = enrollment.enrolled_at.isoformat() if enrollment.enrolled_at else None
+        item["enrollmentStatus"] = enrollment.status
+        item["enrolled"] = True
+        courses.append(item)
+    return {"total": len(courses), "courses": courses}
+
+
+@content_router.get("/courses/instructor/mine")
+def get_instructor_courses(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "instructor")
+    rows = db.execute(
+        select(Course, User.full_name.label("instructor_name"))
+        .join(User, Course.instructor_id == User.id)
+        .where(Course.instructor_id == current_user.id)
+        .order_by(Course.updated_at.desc(), Course.created_at.desc())
+    ).all()
+    courses = [_course_row_to_item(db, row, current_user).model_dump(mode="json") for row in rows]
+    return {"total": len(courses), "courses": courses}
+
+
+@content_router.get("/courses/admin/all")
+def get_admin_courses(
+    category: Optional[str] = Query(default=None),
+    level: Optional[CourseLevel] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    instructor: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "admin")
+    stmt = (
+        select(Course, User.full_name.label("instructor_name"))
+        .join(User, Course.instructor_id == User.id)
+        .order_by(Course.updated_at.desc(), Course.created_at.desc())
+    )
+    if category:
+        stmt = stmt.where(Course.category == category)
+    if level:
+        stmt = stmt.where(Course.level == level.value)
+    if status_filter:
+        stmt = stmt.where(Course.status == status_filter)
+    if instructor:
+        stmt = stmt.where(User.full_name.ilike(f"%{instructor}%"))
+    if search:
+        q = f"%{search}%"
+        stmt = stmt.where(
+            Course.title.ilike(q)
+            | Course.description.ilike(q)
+            | Course.category.ilike(q)
+            | User.full_name.ilike(q)
+        )
+
+    rows = db.execute(stmt).all()
+    courses = [_course_row_to_item(db, row, current_user).model_dump(mode="json") for row in rows]
+    stats = {
+        "totalCourses": db.scalar(select(func.count()).select_from(Course)) or 0,
+        "publishedCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "published")) or 0,
+        "draftCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "draft")) or 0,
+        "archivedCourses": db.scalar(select(func.count()).select_from(Course).where(Course.status == "archived")) or 0,
+        "totalEnrollments": db.scalar(select(func.count()).select_from(Enrollment)) or 0,
+    }
+    return {"total": len(courses), "courses": courses, "stats": stats}
+
+
+@content_router.get("/courses/{course_id}")
+def get_course_detail(
+    course_id: str = Path(...),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+) -> dict:
+    curriculum = get_curriculum(course_id=course_id, current_user=current_user, db=db)
+    return curriculum.model_dump(mode="json")
+
+
+@content_router.patch("/courses/{course_id}")
+def update_course(
+    body: UpdateCourseRequest,
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    course_uuid = _parse_uuid(course_id, "kurs")
+    row = _get_course_with_instructor(db, course_uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+    course, _ = row
+    _require_role(current_user, "instructor", "admin")
+    _require_owner_or_admin(course, current_user)
+
+    if body.title is not None:
+        course.title = body.title
+    if body.description is not None:
+        course.description = body.description
+    if body.category is not None:
+        course.category = body.category
+    if body.level is not None:
+        course.level = body.level
+    cover_url = body.cover_image_url or body.coverImageUrl
+    if cover_url is not None:
+        course.cover_image_url = cover_url
+    duration_min = body.estimated_duration_min or body.estimatedDuration
+    if duration_min is not None:
+        course.estimated_duration_min = duration_min
+    if body.status is not None:
+        course.status = body.status
+    course.updated_at = datetime.now()
+    db.commit()
+    db.refresh(course)
+
+    updated_course, instructor_name = _get_course_with_instructor(db, course.id)
+    return _course_payload(db, updated_course, instructor_name, current_user)
+
+
+@content_router.patch("/courses/{course_id}/status")
+def update_course_status(
+    body: CourseStatusRequest,
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    course_uuid = _parse_uuid(course_id, "kurs")
+    row = _get_course_with_instructor(db, course_uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+    course, _ = row
+    _require_role(current_user, "instructor", "admin")
+    _require_owner_or_admin(course, current_user)
+    course.status = body.status
+    course.updated_at = datetime.now()
+    db.commit()
+    db.refresh(course)
+
+    updated_course, instructor_name = _get_course_with_instructor(db, course.id)
+    return _course_payload(db, updated_course, instructor_name, current_user)
+
+
+@content_router.post("/courses/{course_id}/modules", status_code=status.HTTP_201_CREATED)
+def create_module(
+    body: CreateModuleRequest,
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    course_uuid = _parse_uuid(course_id, "kurs")
+    course = db.get(Course, course_uuid)
+    if course is None:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+    _require_role(current_user, "instructor", "admin")
+    _require_owner_or_admin(course, current_user)
+
+    now = datetime.now()
+    module = Module(
+        id=uuid4(),
+        course_id=course.id,
+        title=body.title,
+        description=body.description,
+        order_index=body.order_index,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(module)
+    course.updated_at = now
+    db.commit()
+    db.refresh(module)
+    return {
+        "id": str(module.id),
+        "courseId": str(module.course_id),
+        "title": module.title,
+        "description": module.description,
+        "orderIndex": module.order_index,
+    }
+
+
+@content_router.post("/modules/{module_id}/lessons", status_code=status.HTTP_201_CREATED)
+def create_lesson(
+    body: CreateLessonRequest,
+    module_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    module_uuid = _parse_uuid(module_id, "modül")
+    module = db.get(Module, module_uuid)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Modül bulunamadı.")
+    course = db.get(Course, module.course_id)
+    _require_role(current_user, "instructor", "admin")
+    _require_owner_or_admin(course, current_user)
+
+    now = datetime.now()
+    lesson = Lesson(
+        id=uuid4(),
+        module_id=module.id,
+        title=body.title,
+        content=body.content,
+        video_url=None,
+        estimated_duration_min=body.estimated_duration_min,
+        order_index=body.order_index,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(lesson)
+    course.updated_at = now
+    module.updated_at = now
+    db.commit()
+    db.refresh(lesson)
+    return {
+        "id": str(lesson.id),
+        "moduleId": str(lesson.module_id),
+        "title": lesson.title,
+        "content": lesson.content,
+        "estimatedDuration": lesson.estimated_duration_min,
+        "orderIndex": lesson.order_index,
+    }
 
 
 class CertVerifyResponse(BaseModel):

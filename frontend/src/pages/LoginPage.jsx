@@ -16,7 +16,8 @@ import { authAPI } from '../api/axios';
 import { useAuth } from '../context/AuthContext';
 
 function defaultPathForRole(role) {
-  if (role === 'instructor' || role === 'admin') return '/profile';
+  if (role === 'instructor') return '/instructor/courses';
+  if (role === 'admin') return '/admin/courses';
   return '/';
 }
 

@@ -9,6 +9,10 @@ import { courseAPI, lessonAPI } from '../api/axios';
 
 const LESSON_ICON = { video: Video, reading: FileText, quiz: FlaskConical, lab: FlaskConical };
 
+function isModuleLocked(mod) {
+  return Boolean(mod?.is_locked || mod?.is_unlocked === false);
+}
+
 function Sidebar({ curriculum, activeLessonId, activeExamId, onSelectLesson, onSelectExam, completedIds }) {
   const [openModules, setOpenModules] = useState({});
 
@@ -53,7 +57,8 @@ function Sidebar({ curriculum, activeLessonId, activeExamId, onSelectLesson, onS
               cursor: 'pointer', borderBottom: '1px solid var(--tc-border)',
             }}
           >
-            <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--tc-text)', textAlign: 'left' }}>
+            <span style={{ fontSize: '0.82rem', fontWeight: 600, color: isModuleLocked(mod) ? 'var(--tc-muted)' : 'var(--tc-text)', textAlign: 'left', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+              {isModuleLocked(mod) && <Lock size={13} color="var(--tc-muted)" />}
               {mod.title}
             </span>
             {openModules[mod.id]
@@ -63,23 +68,33 @@ function Sidebar({ curriculum, activeLessonId, activeExamId, onSelectLesson, onS
 
           {openModules[mod.id] && (
             <div>
+              {isModuleLocked(mod) && (
+                <div style={{ padding: '0.65rem 1rem 0.65rem 1.5rem', color: 'var(--tc-muted)', fontSize: '0.72rem', lineHeight: 1.4, borderBottom: '1px solid var(--tc-border)' }}>
+                  {mod.lock_reason || 'Önceki modül sınavını geçmeden bu modüle erişemezsiniz.'}
+                </div>
+              )}
               {mod.lessons?.map((lesson) => {
                 const Icon = LESSON_ICON[lesson.lesson_type] || BookOpen;
                 const isActive = lesson.id === activeLessonId;
                 const isDone = completedIds.has(lesson.id);
+                const locked = isModuleLocked(mod);
                 return (
                   <button
                     key={lesson.id}
-                    onClick={() => onSelectLesson(lesson)}
+                    onClick={() => onSelectLesson(lesson, mod)}
+                    disabled={locked}
                     style={{
                       width: '100%', padding: '0.6rem 1rem 0.6rem 1.5rem',
                       background: isActive ? 'rgba(255,209,0,0.08)' : 'none',
                       border: 'none', borderLeft: isActive ? '3px solid var(--tc-yellow)' : '3px solid transparent',
                       display: 'flex', alignItems: 'center', gap: '0.6rem',
-                      cursor: 'pointer', textAlign: 'left',
+                      cursor: locked ? 'not-allowed' : 'pointer', textAlign: 'left',
+                      opacity: locked ? 0.55 : 1,
                     }}
                   >
-                    {isDone
+                    {locked
+                      ? <Lock size={14} color="var(--tc-muted)" />
+                      : isDone
                       ? <CheckCircle2 size={14} color="#4ADE80" />
                       : <Icon size={14} color={isActive ? 'var(--tc-yellow)' : 'var(--tc-muted)'} />}
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -94,19 +109,22 @@ function Sidebar({ curriculum, activeLessonId, activeExamId, onSelectLesson, onS
 
               {mod.exams?.map((exam) => {
                 const isActive = exam.id === activeExamId;
+                const locked = isModuleLocked(mod);
                 return (
                   <button
                     key={exam.id}
-                    onClick={() => onSelectExam(exam)}
+                    onClick={() => onSelectExam(exam, mod)}
+                    disabled={locked}
                     style={{
                       width: '100%', padding: '0.6rem 1rem 0.6rem 1.5rem',
                       background: isActive ? 'rgba(255,209,0,0.08)' : 'none',
                       border: 'none', borderLeft: isActive ? '3px solid var(--tc-yellow)' : '3px solid transparent',
                       display: 'flex', alignItems: 'center', gap: '0.6rem',
-                      cursor: 'pointer', textAlign: 'left',
+                      cursor: locked ? 'not-allowed' : 'pointer', textAlign: 'left',
+                      opacity: locked ? 0.55 : 1,
                     }}
                   >
-                    <Trophy size={14} color={isActive ? 'var(--tc-yellow)' : '#A78BFA'} />
+                    {locked ? <Lock size={14} color="var(--tc-muted)" /> : <Trophy size={14} color={isActive ? 'var(--tc-yellow)' : '#A78BFA'} />}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <p style={{ fontSize: '0.78rem', color: isActive ? 'var(--tc-yellow)' : 'var(--tc-text)', fontWeight: isActive ? 600 : 400, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {exam.title}
@@ -163,10 +181,15 @@ function LessonContent({ lesson, onComplete, completing, completed }) {
         </div>
       ) : (
         <div className="card" style={{ padding: '1.5rem', lineHeight: '1.8' }}>
-          <p style={{ color: 'var(--tc-muted)', fontSize: '0.9rem' }}>
+          {lesson.content && (
+            <p style={{ color: 'var(--tc-text)', fontSize: '0.9rem', whiteSpace: 'pre-line' }}>
+              {lesson.content}
+            </p>
+          )}
+          <p style={{ color: 'var(--tc-muted)', fontSize: '0.9rem', display: lesson.content ? 'none' : 'block' }}>
             📖 Bu ders okuma içeriği içermektedir. Aşağıdaki konuları kapsar:
           </p>
-          <ul style={{ marginTop: '1rem', paddingLeft: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <ul style={{ marginTop: '1rem', paddingLeft: '1.5rem', display: lesson.content ? 'none' : 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             {['Temel kavramlar ve tanımlar', 'Pratik uygulama örnekleri', 'Sık yapılan hatalar ve çözümleri', 'İleri seviye ipuçları'].map((item) => (
               <li key={item} style={{ color: 'var(--tc-text)', fontSize: '0.875rem' }}>{item}</li>
             ))}
@@ -233,15 +256,16 @@ export default function LessonViewPage() {
   const [activeExam, setActiveExam] = useState(null);
   const [completedIds, setCompletedIds] = useState(new Set());
   const [completing, setCompleting] = useState(false);
+  const [notice, setNotice] = useState('');
 
-  const allLessons = curriculum?.modules?.flatMap((m) => m.lessons) ?? [];
+  const allLessons = curriculum?.modules?.filter((m) => !isModuleLocked(m)).flatMap((m) => m.lessons) ?? [];
 
   useEffect(() => {
     (async () => {
       try {
         const res = await courseAPI.curriculum(courseId);
         setCurriculum(res.data);
-        const firstLesson = res.data.modules?.[0]?.lessons?.[0];
+        const firstLesson = res.data.modules?.find((mod) => !isModuleLocked(mod))?.lessons?.[0];
         if (firstLesson) setActiveLesson(firstLesson);
       } catch (err) {
         setError(err.response?.data?.detail || 'Müfredat yüklenemedi.');
@@ -251,8 +275,24 @@ export default function LessonViewPage() {
     })();
   }, [courseId]);
 
-  const handleSelectLesson = (lesson) => { setActiveLesson(lesson); setActiveExam(null); };
-  const handleSelectExam = (exam) => { setActiveExam(exam); setActiveLesson(null); };
+  const handleSelectLesson = (lesson, mod) => {
+    if (isModuleLocked(mod)) {
+      setNotice(mod.lock_reason || 'Önceki modül sınavını geçmeden bu modüle erişemezsiniz.');
+      return;
+    }
+    setNotice('');
+    setActiveLesson(lesson);
+    setActiveExam(null);
+  };
+  const handleSelectExam = (exam, mod) => {
+    if (isModuleLocked(mod)) {
+      setNotice(mod.lock_reason || 'Önceki modül sınavını geçmeden bu modüle erişemezsiniz.');
+      return;
+    }
+    setNotice('');
+    setActiveExam(exam);
+    setActiveLesson(null);
+  };
 
   const handleComplete = async () => {
     if (!activeLesson) return;
@@ -305,6 +345,12 @@ export default function LessonViewPage() {
 
       <main style={{ flex: 1, overflowY: 'auto', padding: '2rem', maxWidth: 'calc(100% - 300px)' }}>
         <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+          {notice && (
+            <div className="card" style={{ padding: '0.9rem', color: '#FBBF24', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Lock size={16} /> {notice}
+            </div>
+          )}
 
           {activeExam ? (
             <div className="card animate-fade-in-up" style={{ padding: '2rem', textAlign: 'center' }}>
