@@ -6,7 +6,8 @@ Endpoint'ler:
   POST /api/v1/exams/{exam_id}/start          → Sınava başla (karıştırılmış, cevaplar gizli)
   POST /api/v1/exams/{exam_id}/submit         → Cevapları gönder & otomatik puanla
   GET  /api/v1/exams/{exam_id}/result         → Sınav sonucunu getir
-  GET  /api/v1/certificates/{cert_number}/verify → Sertifika doğrula (public)
+
+Sertifika doğrulama: `GET /api/v1/certificates/{numara}/verify` (course router, public).
 
 Endpointler gerçek PostgreSQL tablolarından beslenir.
 """
@@ -26,7 +27,6 @@ from app.database import get_db
 from app.models.exam import (
     AnswerItem,
     AnswerResult,
-    CertificateVerifyResponse,
     ChoiceSafe,
     DifficultyLevel,
     ExamResultResponse,
@@ -39,7 +39,6 @@ from app.models.exam import (
 )
 from app.models.course_orm import (
     Certificate,
-    Course,
     Exam,
     ExamAttempt,
     Module,
@@ -66,12 +65,17 @@ def _now_iso(value: datetime | None = None) -> str:
 
 
 def _question_type(value: str) -> QuestionType:
-    mapping = {
+    """DB enum (MULTIPLE_CHOICE) veya API snake_case değerlerini QuestionType'a çevirir."""
+    raw = str(value or "").strip()
+    mapping: dict[str, QuestionType] = {
         "MULTIPLE_CHOICE": QuestionType.MULTIPLE_CHOICE,
         "TRUE_FALSE": QuestionType.TRUE_FALSE,
         "MULTI_SELECT": QuestionType.MULTI_SELECT,
+        "multiple_choice": QuestionType.MULTIPLE_CHOICE,
+        "true_false": QuestionType.TRUE_FALSE,
+        "multi_select": QuestionType.MULTI_SELECT,
     }
-    return mapping[value]
+    return mapping.get(raw, QuestionType.MULTIPLE_CHOICE)
 
 
 def _safe_choices(options: Iterable[dict]) -> list[ChoiceSafe]:
@@ -347,6 +351,22 @@ def submit_exam(
                 detail="Bu sınav için aktif deneme bulunamadı. Önce sınavı başlatın.",
             )
 
+        # ── Server-side süre doğrulaması ─────────────────────────────────
+        # Case şartı: "client-side timer tek başına yetmez"
+        if exam.time_limit_min > 0:
+            elapsed_seconds = (datetime.now() - attempt.started_at).total_seconds()
+            allowed_seconds = exam.time_limit_min * 60 + 30  # 30 sn tolerans
+            if elapsed_seconds > allowed_seconds:
+                # Süre dolmuş — attempt'ı kapat, 0 puan ver
+                attempt.finished_at = datetime.now()
+                attempt.score = 0
+                attempt.is_passed = False
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Sınav süresi doldu ({exam.time_limit_min} dakika). Cevaplar kabul edilmedi.",
+                )
+
         questions = list(
             db.scalars(
                 select(Question)
@@ -578,67 +598,4 @@ def get_result(
         certificate_number=certificate_number,
         completed_at=completed_at,
         answers=answer_details,
-    )
-
-
-# ---------------------------------------------------------------------------
-# GET /api/v1/certificates/{cert_number}/verify   (Public endpoint)
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/certificates/{cert_number}/verify",
-    response_model=CertificateVerifyResponse,
-    summary="Sertifika Doğrula (Public)",
-    description=(
-        "**Herkese açık** sertifika doğrulama endpoint'i. "
-        "Sertifika numarasını alır; ad-soyad, kurs adı ve geçerlilik durumunu döner. "
-        "Kimlik doğrulaması **gerektirmez**."
-    ),
-)
-def verify_cert(
-    cert_number: str = Path(
-        ...,
-        examples=["EDUCELL-2026-0001"],
-        description="Doğrulanacak sertifika numarası",
-    ),
-    db: Session = Depends(get_db),
-) -> CertificateVerifyResponse:
-    """
-    Sertifika doğrulama.
-
-    - Geçerli → `is_valid: true` + kişi/kurs bilgisi
-    - Geçersiz → **404** döner.
-    """
-    try:
-        row = db.execute(
-            select(Certificate, User, Course)
-            .join(User, Certificate.user_id == User.id)
-            .join(Course, Certificate.course_id == Course.id)
-            .where(Certificate.certificate_number == cert_number)
-        ).one_or_none()
-    except SQLAlchemyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Sertifika doğrulama veritabanından okunamadı.",
-        ) from exc
-
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{cert_number}' numaralı sertifika bulunamadı.",
-        )
-
-    certificate, student, course = row
-    return CertificateVerifyResponse(
-        certificate_number=certificate.certificate_number,
-        is_valid=True,
-        student_name=student.full_name,
-        course_name=course.title,
-        student_full_name=student.full_name,
-        course_title=course.title,
-        certificate_url=certificate.certificate_url,
-        issued_at=_now_iso(certificate.issued_at),
-        expires_at=None,
-        score=None,
-        message="Sertifika geçerlidir.",
     )

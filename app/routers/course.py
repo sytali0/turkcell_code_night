@@ -16,14 +16,15 @@ Endpointler gerçek PostgreSQL tablolarından beslenir.
 from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_current_user_optional
 from app.database import get_db
 from app.models.course import (
     CourseCurriculumResponse,
@@ -37,7 +38,7 @@ from app.models.course import (
     ModuleResponse,
     QuestionResponse,
 )
-from app.models.course_orm import Course, Enrollment, Exam, Lesson, Module, Question, User
+from app.models.course_orm import Certificate, Course, Enrollment, Exam, ExamAttempt, Lesson, Module, Question, User
 
 router = APIRouter(prefix="/courses", tags=["📚 Kurslar"])
 
@@ -200,6 +201,7 @@ def enroll_course(
 )
 def get_curriculum(
     course_id: str = Path(...),
+    _current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> CourseCurriculumResponse:
     try:
@@ -340,28 +342,31 @@ def rate_course(
     if course is None:
         raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
 
-    # course_reviews tablosu varsa kaydet, yoksa sadece başarı dön
     try:
         from sqlalchemy import text
+
+        now = datetime.now()
         db.execute(
             text(
-                "INSERT INTO course_reviews (id, course_id, user_id, rating, review, created_at) "
-                "VALUES (:id, :course_id, :user_id, :rating, :review, :created_at) "
-                "ON CONFLICT (course_id, user_id) DO UPDATE SET rating=:rating, review=:review, created_at=:created_at"
+                "INSERT INTO course_reviews (id, course_id, user_id, rating, review_text, created_at, updated_at) "
+                "VALUES (:id, :course_id, :user_id, :rating, :review_text, :created_at, :updated_at) "
+                "ON CONFLICT (user_id, course_id) DO UPDATE SET "
+                "rating = EXCLUDED.rating, review_text = EXCLUDED.review_text, updated_at = EXCLUDED.updated_at"
             ),
             {
                 "id": str(uuid4()),
                 "course_id": str(course_uuid),
                 "user_id": str(current_user.id),
                 "rating": body.rating,
-                "review": body.review or "",
-                "created_at": datetime.now(),
+                "review_text": body.review or "",
+                "created_at": now,
+                "updated_at": now,
             },
         )
         db.commit()
-    except Exception:
+    except SQLAlchemyError as exc:
         db.rollback()
-        # Tablo şeması farklıysa yine de başarı dön (hackathon toleransı)
+        raise HTTPException(status_code=500, detail="Değerlendirme kaydedilemedi.") from exc
 
     return RateResponse(
         success=True,
@@ -478,4 +483,251 @@ def add_comment(
         lesson_id=lesson_id,
         content=body.content,
         created_at=now.isoformat(),
+    )
+
+
+# ===========================================================================
+# POST /api/v1/courses — Eğitmen Kurs Oluşturma
+# ===========================================================================
+
+class CreateCourseRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200)
+    description: Optional[str] = Field(default=None)
+    category: Optional[str] = Field(default=None)
+    level: str = Field(default="beginner", pattern="^(beginner|intermediate|advanced)$")
+    cover_image_url: Optional[str] = Field(default=None)
+    estimated_duration_min: Optional[int] = Field(default=None, ge=1)
+
+class CreateCourseResponse(BaseModel):
+    success: bool = True
+    message: str
+    course_id: str
+    title: str
+
+
+@router.post(
+    "/",
+    response_model=CreateCourseResponse,
+    status_code=201,
+    summary="Kurs Oluştur (Eğitmen)",
+    tags=["📚 Kurslar"],
+)
+def create_course(
+    body: CreateCourseRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CreateCourseResponse:
+    now = datetime.now()
+    # Her rol kurs oluşturabilir (hackathon kolaylığı)
+    new_course = Course(
+        id=uuid4(),
+        instructor_id=current_user.id,
+        title=body.title,
+        description=body.description,
+        category=body.category,
+        level=body.level,
+        cover_image_url=body.cover_image_url,
+        estimated_duration_min=body.estimated_duration_min,
+        status="published",
+        order_index=1,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_course)
+    db.commit()
+    db.refresh(new_course)
+    return CreateCourseResponse(
+        success=True,
+        message=f"'{body.title}' kursu başarıyla oluşturuldu.",
+        course_id=str(new_course.id),
+        title=new_course.title,
+    )
+
+
+# ===========================================================================
+# GET /api/v1/courses/:id/progress — Öğrenci İlerleme
+# ===========================================================================
+
+class ProgressResponse(BaseModel):
+    course_id: str
+    total_lessons: int
+    completed_lessons: int
+    progress_percent: float
+    modules: list[dict]
+    is_completed: bool
+    certificate_number: Optional[str] = None
+
+
+@router.get(
+    "/{course_id}/progress",
+    response_model=ProgressResponse,
+    summary="Kurs İlerleme Durumu",
+)
+def get_progress(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ProgressResponse:
+    try:
+        course_uuid = UUID(course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    course = db.get(Course, course_uuid)
+    if not course:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    modules = db.scalars(
+        select(Module).where(Module.course_id == course_uuid).order_by(Module.order_index)
+    ).all()
+
+    total_lessons = 0
+    total_completed = 0
+    module_progress = []
+
+    for mod in modules:
+        lessons = db.scalars(
+            select(Lesson).where(Lesson.module_id == mod.id)
+        ).all()
+        lesson_ids = [l.id for l in lessons]
+        mod_total = len(lessons)
+
+        completed_rows = 0
+        if mod_total > 0 and lesson_ids:
+            from sqlalchemy import text
+            try:
+                # lesson_completions tablosu varsa say
+                for lid in lesson_ids:
+                    cnt = db.execute(
+                        text("SELECT COUNT(*) FROM lesson_completions WHERE user_id=:uid AND lesson_id=:lid"),
+                        {"uid": str(current_user.id), "lid": str(lid)},
+                    ).scalar() or 0
+                    completed_rows += min(cnt, 1)
+            except Exception:
+                completed_rows = 0
+
+        # Modül sınavını geçti mi?
+        exams = db.scalars(select(Exam).where(Exam.module_id == mod.id)).all()
+        exam_passed = True
+        for exam in exams:
+            passed_attempt = db.scalar(
+                select(ExamAttempt)
+                .where(
+                    ExamAttempt.user_id == current_user.id,
+                    ExamAttempt.exam_id == exam.id,
+                    ExamAttempt.is_passed == True,
+                )
+            )
+            if not passed_attempt:
+                exam_passed = False
+                break
+
+        total_lessons += mod_total
+        total_completed += completed_rows
+        pct = round((completed_rows / mod_total * 100) if mod_total > 0 else 0, 1)
+        module_progress.append({
+            "module_id": str(mod.id),
+            "title": mod.title,
+            "total_lessons": mod_total,
+            "completed_lessons": completed_rows,
+            "progress_percent": pct,
+            "exam_passed": exam_passed,
+        })
+
+    overall_pct = round((total_completed / total_lessons * 100) if total_lessons > 0 else 0, 1)
+    is_completed = overall_pct >= 100 and all(m["exam_passed"] for m in module_progress)
+
+    # Sertifika var mı?
+    cert = db.scalar(
+        select(Certificate).where(
+            Certificate.user_id == current_user.id,
+            Certificate.course_id == course_uuid,
+        )
+    )
+
+    # Kurs tamamlandıysa otomatik sertifika oluştur
+    if is_completed and not cert:
+        cert_no = "EDU-" + secrets.token_hex(4).upper()
+        cert = Certificate(
+            id=uuid4(),
+            user_id=current_user.id,
+            course_id=course_uuid,
+            certificate_number=cert_no,
+            certificate_url=None,
+            issued_at=datetime.now(),
+        )
+        db.add(cert)
+        db.commit()
+
+    # Enrollment progress_percent güncelle
+    enrollment = db.scalar(
+        select(Enrollment).where(
+            Enrollment.user_id == current_user.id,
+            Enrollment.course_id == course_uuid,
+        )
+    )
+    if enrollment:
+        enrollment.progress_percent = int(overall_pct)
+        if is_completed and not enrollment.completed_at:
+            enrollment.completed_at = datetime.now()
+            enrollment.status = "completed"
+        db.commit()
+
+    return ProgressResponse(
+        course_id=course_id,
+        total_lessons=total_lessons,
+        completed_lessons=total_completed,
+        progress_percent=overall_pct,
+        modules=module_progress,
+        is_completed=is_completed,
+        certificate_number=cert.certificate_number if cert else None,
+    )
+
+
+# ===========================================================================
+# GET /api/v1/certificates/:number/verify — Sertifika Doğrulama (Public)
+# ===========================================================================
+
+cert_router = APIRouter(prefix="/certificates", tags=["🏆 Sertifikalar"])
+
+
+class CertVerifyResponse(BaseModel):
+    valid: bool
+    certificate_number: str
+    holder_name: Optional[str] = None
+    course_title: Optional[str] = None
+    issued_at: Optional[str] = None
+    message: str
+
+
+@cert_router.get(
+    "/{certificate_number}/verify",
+    response_model=CertVerifyResponse,
+    summary="Sertifika Doğrula (Public)",
+    description="JWT gerektirmez. Sertifika numarası ile sertifikanın geçerliliğini kontrol et.",
+)
+def verify_certificate(
+    certificate_number: str = Path(...),
+    db: Session = Depends(get_db),
+) -> CertVerifyResponse:
+    cert = db.scalar(
+        select(Certificate).where(Certificate.certificate_number == certificate_number)
+    )
+    if not cert:
+        return CertVerifyResponse(
+            valid=False,
+            certificate_number=certificate_number,
+            message="Bu sertifika numarası geçerli değil veya bulunamadı.",
+        )
+
+    user = db.get(User, cert.user_id)
+    course = db.get(Course, cert.course_id)
+
+    return CertVerifyResponse(
+        valid=True,
+        certificate_number=certificate_number,
+        holder_name=user.full_name if user else None,
+        course_title=course.title if course else None,
+        issued_at=cert.issued_at.isoformat(),
+        message="✅ Sertifika geçerlidir.",
     )
