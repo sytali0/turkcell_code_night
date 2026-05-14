@@ -41,7 +41,10 @@ api.interceptors.response.use(
 // ── Auth endpoints ─────────────────────────────────────────────────────────
 export const authAPI = {
   register: (data) => api.post('/auth/register', data),
+  verifyOtp: (data) => api.post('/auth/verify-otp', data),
   login:    (data) => api.post('/auth/login', data),
+  me:       () => api.get('/auth/me'),
+  updateMe: (data) => api.put('/auth/me', data),
 };
 
 // ── Course endpoints ───────────────────────────────────────────────────────

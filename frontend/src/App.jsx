@@ -10,6 +10,7 @@ const CourseCatalogPage = lazy(() => import('./pages/CourseCatalogPage'));
 const LessonViewPage    = lazy(() => import('./pages/LessonViewPage'));
 const ExamPage          = lazy(() => import('./pages/ExamPage'));
 const ExamResultPage    = lazy(() => import('./pages/ExamResultPage'));
+const ProfilePage       = lazy(() => import('./pages/ProfilePage'));
 
 // Full-screen loading fallback
 function PageLoader() {
@@ -54,7 +55,7 @@ export default function App() {
               <Route
                 path="/courses/:courseId/learn"
                 element={
-                  <PrivateRoute>
+                  <PrivateRoute allowedRoles={['student']}>
                     <LessonViewPage />
                   </PrivateRoute>
                 }
@@ -62,7 +63,7 @@ export default function App() {
               <Route
                 path="/exams/:examId"
                 element={
-                  <PrivateRoute>
+                  <PrivateRoute allowedRoles={['student']}>
                     <ExamPage />
                   </PrivateRoute>
                 }
@@ -70,8 +71,16 @@ export default function App() {
               <Route
                 path="/exams/:examId/result"
                 element={
-                  <PrivateRoute>
+                  <PrivateRoute allowedRoles={['student']}>
                     <ExamResultPage />
+                  </PrivateRoute>
+                }
+              />
+              <Route
+                path="/profile"
+                element={
+                  <PrivateRoute>
+                    <ProfilePage />
                   </PrivateRoute>
                 }
               />

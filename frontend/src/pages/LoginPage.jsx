@@ -1,30 +1,34 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Phone,
-  KeyRound,
-  User,
-  GraduationCap,
-  ArrowRight,
-  Eye,
-  EyeOff,
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
-  Sparkles,
+  GraduationCap,
+  KeyRound,
+  Phone,
   ShieldCheck,
+  Sparkles,
+  User,
 } from 'lucide-react';
 import { authAPI } from '../api/axios';
 import { useAuth } from '../context/AuthContext';
 
-// ── Küçük yardımcı bileşenler ─────────────────────────────────────────────
+function defaultPathForRole(role) {
+  if (role === 'instructor' || role === 'admin') return '/profile';
+  return '/';
+}
+
+function normalizePhoneInput(value) {
+  const cleaned = value.replace(/[\s\-()]/g, '');
+  return cleaned.startsWith('+') ? cleaned.slice(1) : cleaned;
+}
 
 function InputGroup({ label, id, icon: Icon, error, ...props }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-      <label
-        htmlFor={id}
-        style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--tc-muted)', letterSpacing: '0.04em' }}
-      >
+      <label htmlFor={id} style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--tc-muted)', letterSpacing: '0.04em' }}>
         {label}
       </label>
       <div style={{ position: 'relative' }}>
@@ -44,13 +48,33 @@ function InputGroup({ label, id, icon: Icon, error, ...props }) {
         <input
           id={id}
           className="input-field"
-          style={{
-            paddingLeft: Icon ? '2.5rem' : '1rem',
-            borderColor: error ? '#F87171' : undefined,
-          }}
+          style={{ paddingLeft: Icon ? '2.5rem' : '1rem', borderColor: error ? '#F87171' : undefined }}
           {...props}
         />
       </div>
+      {error && (
+        <p style={{ fontSize: '0.75rem', color: '#F87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+          <AlertCircle size={12} /> {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SelectGroup({ label, id, error, children, ...props }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+      <label htmlFor={id} style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--tc-muted)', letterSpacing: '0.04em' }}>
+        {label}
+      </label>
+      <select
+        id={id}
+        className="input-field"
+        style={{ borderColor: error ? '#F87171' : undefined }}
+        {...props}
+      >
+        {children}
+      </select>
       {error && (
         <p style={{ fontSize: '0.75rem', color: '#F87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
           <AlertCircle size={12} /> {error}
@@ -76,61 +100,92 @@ function OtpHint() {
       }}
     >
       <ShieldCheck size={14} />
-      <span>Demo OTP kodu: <strong>1234</strong> (SMS simülasyonu)</span>
+      <span>Demo OTP kodu: <strong>1234</strong></span>
     </div>
   );
 }
 
-// ── Ana bileşen ───────────────────────────────────────────────────────────
-
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, isAuthenticated } = useAuth();
+  const { isAuthenticated, login, user } = useAuth();
 
-  // Zaten giriş yapmışsa ana sayfaya at
-  useEffect(() => {
-    if (isAuthenticated) {
-      const from = location.state?.from?.pathname || '/';
-      navigate(from, { replace: true });
-    }
-  }, [isAuthenticated, navigate, location]);
-
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [mode, setMode] = useState('login');
+  const [registerStep, setRegisterStep] = useState('details');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState('');
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
-
   const [form, setForm] = useState({
     phone_number: '',
     otp_code: '',
     full_name: '',
+    role: '',
   });
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
+  useEffect(() => {
+    if (isAuthenticated) {
+      const from = location.state?.from?.pathname || defaultPathForRole(user?.role);
+      navigate(from, { replace: true });
+    }
+  }, [isAuthenticated, location.state, navigate, user]);
+
+  const switchMode = (nextMode) => {
+    setMode(nextMode);
+    setRegisterStep('details');
+    setError('');
+    setSuccess('');
+    setFieldErrors({});
+    setForm((prev) => ({ ...prev, otp_code: '' }));
+  };
+
+  const handleChange = (event) => {
+    const { name, value } = event.target;
     setForm((prev) => ({ ...prev, [name]: value }));
     setFieldErrors((prev) => ({ ...prev, [name]: '' }));
     setError('');
   };
 
   const validate = () => {
-    const errs = {};
-    if (!form.phone_number.trim()) errs.phone_number = 'Telefon numarası zorunludur';
-    else if (!/^0[5][0-9]{9}$/.test(form.phone_number.replace(/\s/g, '')))
-      errs.phone_number = "Geçerli bir Türkiye numarası girin (05XX...)";
-    if (!form.otp_code.trim()) errs.otp_code = 'OTP kodu zorunludur';
-    else if (!/^\d{4,6}$/.test(form.otp_code)) errs.otp_code = '4-6 haneli sayısal kod girin';
-    if (mode === 'register' && !form.full_name.trim()) errs.full_name = 'Ad Soyad zorunludur';
-    return errs;
+    const errors = {};
+    const phone = normalizePhoneInput(form.phone_number);
+    const requiresOtp = mode === 'login' || registerStep === 'otp';
+
+    if (!phone) errors.phone_number = 'GSM numarası zorunludur';
+    else if (!/^(05[0-9]{9}|90[5][0-9]{9})$/.test(phone)) {
+      errors.phone_number = 'Geçerli bir Turkcell GSM numarası girin';
+    }
+
+    if (mode === 'register') {
+      if (!form.full_name.trim()) errors.full_name = 'Ad Soyad zorunludur';
+      if (!form.role) errors.role = 'Rol seçimi zorunludur';
+    }
+
+    if (requiresOtp) {
+      if (!form.otp_code.trim()) errors.otp_code = 'OTP kodu zorunludur';
+      else if (!/^[0-9]{4}$/.test(form.otp_code)) errors.otp_code = 'OTP 4 haneli olmalıdır';
+    }
+
+    return errors;
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length > 0) {
-      setFieldErrors(errs);
+  const finishWithToken = (token, nextUser) => {
+    login(token, nextUser);
+    const from = location.state?.from?.pathname || defaultPathForRole(nextUser?.role);
+    navigate(from, { replace: true });
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const errors = validate();
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    if (mode === 'register' && registerStep === 'details') {
+      setRegisterStep('otp');
+      setSuccess('OTP doğrulama adımına geçildi. Demo kodu: 1234');
       return;
     }
 
@@ -139,48 +194,41 @@ export default function LoginPage() {
     setSuccess('');
 
     try {
+      const phone = normalizePhoneInput(form.phone_number);
+
       if (mode === 'register') {
-        // Kayıt
-        await authAPI.register({
-          phone_number: form.phone_number.replace(/\s/g, ''),
+        await authAPI.verifyOtp({ phone_number: phone, otp_code: form.otp_code });
+        const registerRes = await authAPI.register({
+          phone_number: phone,
           otp_code: form.otp_code,
           full_name: form.full_name,
+          role: form.role,
         });
-        setSuccess('Kayıt başarılı! Giriş yapılıyor…');
-        // Kayıt sonrası otomatik giriş dene
-        const loginRes = await authAPI.login({
-          phone_number: form.phone_number.replace(/\s/g, ''),
-          otp_code: form.otp_code,
-        });
-        const { access_token, token_type } = loginRes.data;
-        login(access_token, { phone_number: form.phone_number, full_name: form.full_name });
-        navigate('/', { replace: true });
-      } else {
-        // Giriş
-        const res = await authAPI.login({
-          phone_number: form.phone_number.replace(/\s/g, ''),
-          otp_code: form.otp_code,
-        });
-        const { access_token } = res.data;
-        login(access_token, { phone_number: form.phone_number });
-        navigate('/', { replace: true });
+
+        if (registerRes.data.access_token) {
+          finishWithToken(registerRes.data.access_token, registerRes.data.user);
+          return;
+        }
+
+        const loginRes = await authAPI.login({ phone_number: phone, otp_code: form.otp_code });
+        finishWithToken(loginRes.data.access_token, loginRes.data.user);
+        return;
       }
+
+      const res = await authAPI.login({ phone_number: phone, otp_code: form.otp_code });
+      finishWithToken(res.data.access_token, res.data.user);
     } catch (err) {
-      const msg =
-        err.response?.data?.detail ||
-        (mode === 'register' ? 'Kayıt başarısız. Bilgileri kontrol edin.' : 'Giriş başarısız. Bilgileri kontrol edin.');
-      setError(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      const fallback = mode === 'register'
+        ? 'Kayıt başarısız. Bilgileri kontrol edin.'
+        : 'Giriş başarısız. Bilgileri kontrol edin.';
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : fallback);
     } finally {
       setLoading(false);
     }
   };
 
-  const switchMode = (newMode) => {
-    setMode(newMode);
-    setError('');
-    setSuccess('');
-    setFieldErrors({});
-  };
+  const isRegisterOtp = mode === 'register' && registerStep === 'otp';
 
   return (
     <div
@@ -194,7 +242,6 @@ export default function LoginPage() {
         overflow: 'hidden',
       }}
     >
-      {/* ── Arka plan dekoratif elementler ── */}
       <div
         style={{
           position: 'absolute',
@@ -218,11 +265,7 @@ export default function LoginPage() {
         }}
       />
 
-      <div
-        className="animate-fade-in-up"
-        style={{ width: '100%', maxWidth: '440px', position: 'relative', zIndex: 1 }}
-      >
-        {/* ── Logo & Başlık ── */}
+      <div className="animate-fade-in-up" style={{ width: '100%', maxWidth: '440px', position: 'relative', zIndex: 1 }}>
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div
             style={{
@@ -239,23 +282,14 @@ export default function LoginPage() {
           >
             <GraduationCap size={32} color="var(--tc-navy)" strokeWidth={2.5} />
           </div>
-          <h1
-            style={{
-              fontSize: '1.75rem',
-              fontWeight: 800,
-              color: 'var(--tc-text)',
-              letterSpacing: '-0.03em',
-              marginBottom: '0.4rem',
-            }}
-          >
+          <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--tc-text)', letterSpacing: '-0.03em', marginBottom: '0.4rem' }}>
             Edu<span style={{ color: 'var(--tc-yellow)' }}>Cell</span>
           </h1>
           <p style={{ fontSize: '0.875rem', color: 'var(--tc-muted)' }}>
-            {mode === 'login' ? 'Hesabına giriş yap' : 'Yeni hesap oluştur'}
+            {mode === 'login' ? 'Hesabına giriş yap' : isRegisterOtp ? 'OTP doğrulama' : 'Yeni hesap oluştur'}
           </p>
         </div>
 
-        {/* ── Kart ── */}
         <div
           style={{
             background: 'var(--tc-surface)',
@@ -265,17 +299,7 @@ export default function LoginPage() {
             boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
           }}
         >
-          {/* ── Tab switcher ── */}
-          <div
-            style={{
-              display: 'flex',
-              gap: '0.25rem',
-              background: 'var(--tc-surface2)',
-              padding: '0.25rem',
-              borderRadius: '12px',
-              marginBottom: '1.75rem',
-            }}
-          >
+          <div style={{ display: 'flex', gap: '0.25rem', background: 'var(--tc-surface2)', padding: '0.25rem', borderRadius: '12px', marginBottom: '1.75rem' }}>
             {[
               { key: 'login', label: 'Giriş Yap' },
               { key: 'register', label: 'Kayıt Ol' },
@@ -283,6 +307,7 @@ export default function LoginPage() {
               <button
                 key={key}
                 onClick={() => switchMode(key)}
+                type="button"
                 style={{
                   flex: 1,
                   padding: '0.55rem',
@@ -291,7 +316,6 @@ export default function LoginPage() {
                   cursor: 'pointer',
                   fontSize: '0.875rem',
                   fontWeight: 600,
-                  transition: 'all 0.2s',
                   background: mode === key ? 'var(--tc-yellow)' : 'transparent',
                   color: mode === key ? 'var(--tc-navy)' : 'var(--tc-muted)',
                   boxShadow: mode === key ? '0 2px 8px rgba(255,209,0,0.25)' : 'none',
@@ -302,10 +326,9 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {/* ── Form ── */}
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {mode === 'register' && (
-              <div className="animate-fade-in-up">
+            {mode === 'register' && !isRegisterOtp && (
+              <>
                 <InputGroup
                   label="AD SOYAD"
                   id="full_name"
@@ -318,155 +341,136 @@ export default function LoginPage() {
                   error={fieldErrors.full_name}
                   autoComplete="name"
                 />
+                <SelectGroup
+                  label="ROL"
+                  id="role"
+                  name="role"
+                  value={form.role}
+                  onChange={handleChange}
+                  error={fieldErrors.role}
+                >
+                  <option value="">Rol seçin</option>
+                  <option value="student">Öğrenci</option>
+                  <option value="instructor">Eğitmen</option>
+                  <option value="admin">Admin</option>
+                </SelectGroup>
+              </>
+            )}
+
+            {!isRegisterOtp && (
+              <InputGroup
+                label="GSM NUMARASI"
+                id="phone_number"
+                name="phone_number"
+                icon={Phone}
+                type="tel"
+                placeholder="05321234567"
+                value={form.phone_number}
+                onChange={handleChange}
+                error={fieldErrors.phone_number}
+                autoComplete="tel"
+                inputMode="numeric"
+              />
+            )}
+
+            {isRegisterOtp && (
+              <div style={{ padding: '0.85rem 1rem', border: '1px solid var(--tc-border)', borderRadius: '10px', background: 'var(--tc-surface2)' }}>
+                <p style={{ fontSize: '0.75rem', color: 'var(--tc-muted)', marginBottom: '0.25rem' }}>GSM</p>
+                <p style={{ fontSize: '0.9rem', color: 'var(--tc-text)', fontWeight: 700 }}>{form.phone_number}</p>
               </div>
             )}
 
-            <InputGroup
-              label="TELEFON NUMARASI"
-              id="phone_number"
-              name="phone_number"
-              icon={Phone}
-              type="tel"
-              placeholder="05321234567"
-              value={form.phone_number}
-              onChange={handleChange}
-              error={fieldErrors.phone_number}
-              autoComplete="tel"
-              inputMode="numeric"
-            />
+            {(mode === 'login' || isRegisterOtp) && (
+              <>
+                <InputGroup
+                  label="OTP KODU"
+                  id="otp_code"
+                  name="otp_code"
+                  icon={KeyRound}
+                  type="text"
+                  placeholder="1234"
+                  value={form.otp_code}
+                  onChange={handleChange}
+                  error={fieldErrors.otp_code}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  maxLength={4}
+                />
+                <OtpHint />
+              </>
+            )}
 
-            <InputGroup
-              label="OTP KODU"
-              id="otp_code"
-              name="otp_code"
-              icon={KeyRound}
-              type="text"
-              placeholder="••••"
-              value={form.otp_code}
-              onChange={handleChange}
-              error={fieldErrors.otp_code}
-              autoComplete="one-time-code"
-              inputMode="numeric"
-              maxLength={6}
-            />
-
-            <OtpHint />
-
-            {/* ── Hata mesajı ── */}
             {error && (
-              <div
-                className="animate-fade-in"
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '0.5rem',
-                  padding: '0.75rem 0.9rem',
-                  background: 'rgba(239,68,68,0.1)',
-                  border: '1px solid rgba(239,68,68,0.25)',
-                  borderRadius: '10px',
-                  color: '#F87171',
-                  fontSize: '0.825rem',
-                }}
-              >
+              <div className="animate-fade-in" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', padding: '0.75rem 0.9rem', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '10px', color: '#F87171', fontSize: '0.825rem' }}>
                 <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
                 {error}
               </div>
             )}
 
-            {/* ── Başarı mesajı ── */}
             {success && (
-              <div
-                className="animate-fade-in"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                  padding: '0.75rem 0.9rem',
-                  background: 'rgba(34,197,94,0.1)',
-                  border: '1px solid rgba(34,197,94,0.25)',
-                  borderRadius: '10px',
-                  color: '#4ADE80',
-                  fontSize: '0.825rem',
-                }}
-              >
+              <div className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 0.9rem', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '10px', color: '#4ADE80', fontSize: '0.825rem' }}>
                 <CheckCircle2 size={15} />
                 {success}
               </div>
             )}
 
-            {/* ── Submit butonu ── */}
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={loading}
-              style={{ width: '100%', marginTop: '0.25rem', padding: '0.8rem' }}
-            >
-              {loading ? (
-                <>
-                  <span className="spinner" style={{ width: '18px', height: '18px', borderWidth: '2px' }} />
-                  {mode === 'register' ? 'Kayıt yapılıyor…' : 'Giriş yapılıyor…'}
-                </>
-              ) : (
-                <>
-                  {mode === 'register' ? (
-                    <>
-                      <Sparkles size={16} />
-                      Hesap Oluştur
-                    </>
-                  ) : (
-                    <>
-                      Giriş Yap
-                      <ArrowRight size={16} />
-                    </>
-                  )}
-                </>
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              {isRegisterOtp && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setRegisterStep('details');
+                    setSuccess('');
+                    setError('');
+                  }}
+                  style={{ flex: 1 }}
+                >
+                  <ArrowLeft size={16} /> Geri
+                </button>
               )}
-            </button>
+              <button type="submit" className="btn-primary" disabled={loading} style={{ flex: 2, width: '100%', padding: '0.8rem' }}>
+                {loading ? (
+                  <>
+                    <span className="spinner" style={{ width: '18px', height: '18px', borderWidth: '2px' }} />
+                    İşleniyor...
+                  </>
+                ) : mode === 'register' && !isRegisterOtp ? (
+                  <>
+                    OTP'ye Geç <ArrowRight size={16} />
+                  </>
+                ) : mode === 'register' ? (
+                  <>
+                    <Sparkles size={16} /> Hesap Oluştur
+                  </>
+                ) : (
+                  <>
+                    Giriş Yap <ArrowRight size={16} />
+                  </>
+                )}
+              </button>
+            </div>
           </form>
         </div>
 
-        {/* ── Alt bilgi ── */}
         <p style={{ textAlign: 'center', marginTop: '1.5rem', fontSize: '0.78rem', color: 'var(--tc-muted)' }}>
           {mode === 'login' ? (
             <>
               Hesabın yok mu?{' '}
-              <button
-                onClick={() => switchMode('register')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--tc-yellow)',
-                  fontWeight: 600,
-                  fontSize: 'inherit',
-                  padding: 0,
-                }}
-              >
+              <button onClick={() => switchMode('register')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tc-yellow)', fontWeight: 600, fontSize: 'inherit', padding: 0 }}>
                 Kayıt ol
               </button>
             </>
           ) : (
             <>
               Zaten hesabın var mı?{' '}
-              <button
-                onClick={() => switchMode('login')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--tc-yellow)',
-                  fontWeight: 600,
-                  fontSize: 'inherit',
-                  padding: 0,
-                }}
-              >
+              <button onClick={() => switchMode('login')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tc-yellow)', fontWeight: 600, fontSize: 'inherit', padding: 0 }}>
                 Giriş yap
               </button>
             </>
           )}
         </p>
 
-        {/* ── Turkcell branding ── */}
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.72rem', color: '#334155' }}>
           © 2026 Turkcell CodeNight · EduCell Platformu
         </p>
