@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user_optional
 from app.database import get_db
 from app.models.exam import (
     AnswerItem,
@@ -48,6 +48,7 @@ from app.models.course_orm import (
 )
 
 router = APIRouter(tags=["🎓 Sınavlar & Sertifikalar"])
+TEST_STUDENT_EMAIL = "ogrenci@educell.com"
 
 
 def _parse_uuid(value: str, resource_name: str) -> UUID:
@@ -62,6 +63,19 @@ def _parse_uuid(value: str, resource_name: str) -> UUID:
 
 def _now_iso(value: datetime | None = None) -> str:
     return (value or datetime.now()).isoformat()
+
+
+def _resolve_student(current_user: User | None, db: Session) -> User:
+    if current_user is not None:
+        return current_user
+
+    student = db.scalar(select(User).where(User.email == TEST_STUDENT_EMAIL))
+    if student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Test öğrencisi bulunamadı: {TEST_STUDENT_EMAIL}",
+        )
+    return student
 
 
 def _question_type(value: str) -> QuestionType:
@@ -191,7 +205,7 @@ def start_exam(
         examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Başlatılacak sınavın ID'si",
     ),
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> ExamSessionResponse:
     """
@@ -210,7 +224,7 @@ def start_exam(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = current_user
+        student = _resolve_student(current_user, db)
         # Yalnızca tamamlanmış girişimleri say (finished_at dolu olanlar)
         finished_attempt_count = db.scalar(
             select(func.count())
@@ -222,7 +236,8 @@ def start_exam(
             )
         ) or 0
 
-        # Yarım kalmış (açık) girişim varsa onu kapat
+        # Yarım kalmış (açık) girişim varsa aynı oturumu dön.
+        # Sayfayı yenilemek veya tekrar denemek yeni deneme hakkı tüketmemeli.
         open_attempt = db.scalar(
             select(ExamAttempt)
             .where(
@@ -230,31 +245,30 @@ def start_exam(
                 ExamAttempt.exam_id == exam.id,
                 ExamAttempt.finished_at.is_(None),
             )
+            .order_by(ExamAttempt.started_at.desc(), ExamAttempt.created_at.desc())
         )
         if open_attempt is not None:
-            open_attempt.finished_at = datetime.now()
-            db.flush()
-            finished_attempt_count += 1
+            attempt = open_attempt
+        else:
+            if finished_attempt_count >= exam.max_attempts:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Bu sınav için maksimum deneme hakkı ({exam.max_attempts}) doldu.",
+                )
 
-        if finished_attempt_count >= exam.max_attempts:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Bu sınav için maksimum deneme hakkı ({exam.max_attempts}) doldu.",
+            now = datetime.now()
+            attempt = ExamAttempt(
+                id=uuid4(),
+                user_id=student.id,
+                exam_id=exam.id,
+                started_at=now,
+                finished_at=None,
+                score=None,
+                is_passed=False,
+                attempt_no=finished_attempt_count + 1,
+                created_at=now,
             )
-
-        now = datetime.now()
-        attempt = ExamAttempt(
-            id=uuid4(),
-            user_id=student.id,
-            exam_id=exam.id,
-            started_at=now,
-            finished_at=None,
-            score=None,
-            is_passed=False,
-            attempt_no=finished_attempt_count + 1,
-            created_at=now,
-        )
-        db.add(attempt)
+            db.add(attempt)
 
         questions = list(
             db.scalars(
@@ -317,7 +331,7 @@ def submit_exam(
         description="Puanlanacak sınavın ID'si",
     ),
     body: ExamSubmitRequest = ...,
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> ExamSubmitResponse:
     """
@@ -335,7 +349,7 @@ def submit_exam(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = current_user
+        student = _resolve_student(current_user, db)
         attempt = db.scalar(
             select(ExamAttempt)
             .where(
@@ -480,7 +494,7 @@ def get_result(
         examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Sonucu getirilecek sınavın ID'si",
     ),
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ) -> ExamResultResponse:
     """
@@ -498,7 +512,7 @@ def get_result(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = current_user
+        student = _resolve_student(current_user, db)
         attempt = db.scalar(
             select(ExamAttempt)
             .where(

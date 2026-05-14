@@ -37,7 +37,11 @@ function useTimer(totalSeconds, onExpire) {
 function QuestionTypeBadge({ type }) {
   const map = {
     MULTIPLE_CHOICE: { label: 'Tek Seçenek', color: 'var(--tc-yellow)', bg: 'rgba(255,209,0,0.1)' },
+    multiple_choice: { label: 'Tek Seçenek', color: 'var(--tc-yellow)', bg: 'rgba(255,209,0,0.1)' },
     TRUE_FALSE:      { label: 'Doğru/Yanlış', color: '#34D399', bg: 'rgba(52,211,153,0.1)' },
+    true_false:      { label: 'Doğru/Yanlış', color: '#34D399', bg: 'rgba(52,211,153,0.1)' },
+    MULTI_SELECT:    { label: 'Çok Seçenekli', color: '#A78BFA', bg: 'rgba(167,139,250,0.1)' },
+    multi_select:    { label: 'Çok Seçenekli', color: '#A78BFA', bg: 'rgba(167,139,250,0.1)' },
     MULTIPLE_SELECT: { label: 'Çok Seçenekli', color: '#A78BFA', bg: 'rgba(167,139,250,0.1)' },
   };
   const info = map[type] || { label: type, color: 'var(--tc-muted)', bg: 'var(--tc-surface2)' };
@@ -85,6 +89,107 @@ function ChoiceButton({ choice, selected, multiSelect, onToggle }) {
       </span>
     </button>
   );
+}
+
+function normalizeQuestionType(question) {
+  return question?.type || question?.question_type || '';
+}
+
+function choicesFromOptionFields(question) {
+  const fieldGroups = [
+    [['A', 'option_a'], ['B', 'option_b'], ['C', 'option_c'], ['D', 'option_d']],
+    [['A', 'answerA'], ['B', 'answerB'], ['C', 'answerC'], ['D', 'answerD']],
+  ];
+
+  for (const fields of fieldGroups) {
+    const choices = fields
+      .map(([id, field]) => ({ id, text: question?.[field] }))
+      .filter((choice) => choice.text !== undefined && choice.text !== null && String(choice.text).trim());
+
+    if (choices.length > 0) return choices;
+  }
+
+  return [];
+}
+
+function normalizeChoices(question) {
+  const candidates = [question?.choices, question?.options, question?.answers];
+  let rawChoices = candidates.find((value) => Array.isArray(value) && value.length > 0);
+
+  if (!rawChoices) {
+    const objectChoices = candidates.find((value) => value && typeof value === 'object' && !Array.isArray(value));
+    if (objectChoices) {
+      rawChoices = Object.entries(objectChoices).map(([id, value]) => (
+        value && typeof value === 'object'
+          ? { id, ...value }
+          : { id, text: value }
+      ));
+    }
+  }
+
+  if (!rawChoices) {
+    rawChoices = choicesFromOptionFields(question);
+  }
+
+  if (!Array.isArray(rawChoices) || rawChoices.length === 0) {
+    console.warn('[ExamPage] Question options are empty', {
+      questionId: question?.id,
+      questionText: question?.text,
+      rawChoices,
+    });
+    return [];
+  }
+
+  return rawChoices.map((choice, index) => {
+    if (typeof choice === 'string') {
+      return { id: String.fromCharCode(65 + index), text: choice };
+    }
+
+    const id = String(choice.id ?? choice.key ?? choice.option_id ?? choice.value ?? String.fromCharCode(65 + index));
+    const text = choice.text ?? choice.label ?? choice.option_text ?? choice.answer_text ?? choice.title ?? choice.name ?? choice.value ?? '';
+
+    if (!String(text).trim()) {
+      console.warn('[ExamPage] Question option text is empty', {
+        questionId: question?.id,
+        questionText: question?.text,
+        optionId: id,
+        rawChoice: choice,
+      });
+    }
+
+    return { ...choice, id, text: String(text) };
+  });
+}
+
+function prepareExamSession(data) {
+  const rawQuestions = Array.isArray(data?.questions) ? data.questions : [];
+
+  console.log('[ExamPage] Raw exam start response', data);
+  console.log('[ExamPage] Raw question data', rawQuestions);
+  console.log('[ExamPage] questions length', rawQuestions.length);
+
+  const parsedQuestions = rawQuestions.map((question, index) => {
+    const parsedQuestion = {
+      ...question,
+      type: normalizeQuestionType(question),
+      choices: normalizeChoices(question),
+    };
+    console.log('[ExamPage] Parsed Question', { index, question: parsedQuestion });
+    return parsedQuestion;
+  });
+
+  if (parsedQuestions.length === 0) {
+    throw new Error('Sınav soruları bulunamadı.');
+  }
+
+  return { ...data, questions: parsedQuestions };
+}
+
+function getExamStartError(err) {
+  const detail = err.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (err.message) return err.message;
+  return 'Sınav başlatılamadı.';
 }
 
 // ── Soru navigasyon mini-dot'ları ──────────────────────────────────────────
@@ -141,25 +246,30 @@ export default function ExamPage() {
   );
 
   // ── Sınavı başlat ──
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await examAPI.start(examId);
-        setSession(res.data);
-        setPhase('ready');
-      } catch (err) {
-        const msg = err.response?.data?.detail;
-        setError(typeof msg === 'string' ? msg : 'Sınav başlatılamadı.');
-        setPhase('error');
-      }
-    })();
+  const loadExam = useCallback(async () => {
+    setPhase('loading');
+    setError('');
+    try {
+      const res = await examAPI.start(examId);
+      setSession(prepareExamSession(res.data));
+      setPhase('ready');
+    } catch (err) {
+      console.error('[ExamPage] Exam start failed', err);
+      setError(getExamStartError(err));
+      setPhase('error');
+    }
   }, [examId]);
+
+  useEffect(() => {
+    loadExam();
+  }, [loadExam]);
 
   // ── Cevap seç/kaldır ──
   const handleToggle = useCallback((choiceId) => {
     const q = session?.questions?.[currentQ];
     if (!q) return;
-    const isMulti = q.type === 'MULTIPLE_SELECT';
+    const questionType = normalizeQuestionType(q);
+    const isMulti = questionType === 'MULTI_SELECT' || questionType === 'multi_select' || questionType === 'MULTIPLE_SELECT';
 
     setAnswers((prev) => {
       const cur = prev[currentQ] || [];
@@ -226,7 +336,7 @@ export default function ExamPage() {
         <p style={{ color: '#F87171', fontSize: '0.875rem', marginBottom: '1.5rem' }}>{error}</p>
         <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap' }}>
           <button onClick={() => navigate(-1)} className="btn-secondary">Geri Dön</button>
-          <button onClick={() => { setPhase('loading'); setError(''); examAPI.start(examId).then((r) => { setSession(r.data); setPhase('ready'); }).catch(() => setPhase('error')); }} className="btn-primary">
+          <button onClick={loadExam} className="btn-primary">
             Tekrar Dene
           </button>
         </div>
@@ -281,7 +391,8 @@ export default function ExamPage() {
   // ── SINAV EKRANI ──────────────────────────────────────────────────────
   const q = questions[currentQ];
   if (!q) return null;
-  const isMulti = q.type === 'MULTIPLE_SELECT';
+  const questionType = normalizeQuestionType(q);
+  const isMulti = questionType === 'MULTI_SELECT' || questionType === 'multi_select' || questionType === 'MULTIPLE_SELECT';
   const selectedChoices = answers[currentQ] || [];
   const choices = q.choices || [];
 
@@ -331,7 +442,7 @@ export default function ExamPage() {
                 <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--tc-yellow)' }}>
                   Soru {currentQ + 1} / {questions.length}
                 </span>
-                <QuestionTypeBadge type={q.type} />
+                <QuestionTypeBadge type={questionType} />
               </div>
               <button
                 onClick={() => toggleFlag(currentQ)}
