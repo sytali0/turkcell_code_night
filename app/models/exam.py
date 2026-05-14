@@ -11,7 +11,7 @@ Veri yapıları:
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -87,8 +87,10 @@ class QuestionSafe(BaseModel):
 
 class ExamSessionResponse(BaseModel):
     """POST /exams/{id}/start yanıtı."""
+    attempt_id: str
     exam_id: str
     exam_title: str
+    time_limit_min: int
     duration_minutes: int
     total_questions: int
     total_points: float
@@ -158,6 +160,12 @@ class ExamSubmitResponse(BaseModel):
     """POST /exams/{id}/submit tam yanıtı."""
     exam_id: str
     exam_title: str
+    attempt_id: str
+    score: float
+    is_passed: bool
+    correct_count: int
+    wrong_count: int
+    breakdown: dict[str, Any]
     score_breakdown: ScoreBreakdown
     per_question_results: List[AnswerResult]
     grade_label: str = Field(..., description="AA, BA, BB, CB, CC, DC, DD, FF")
@@ -172,7 +180,11 @@ class ExamResultResponse(BaseModel):
     exam_title: str
     student_name: str
     score: float
+    is_passed: bool
     passed: bool
+    attempt_no: int
+    started_at: str
+    finished_at: Optional[str] = None
     correct_count: int
     wrong_count: int
     blank_count: int
@@ -180,6 +192,7 @@ class ExamResultResponse(BaseModel):
     duration_taken_minutes: int
     certificate_number: Optional[str] = None
     completed_at: str
+    answers: List[AnswerResult] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +204,11 @@ class CertificateVerifyResponse(BaseModel):
     """GET /certificates/{cert_number}/verify yanıtı."""
     certificate_number: str
     is_valid: bool
+    student_name: Optional[str] = None
+    course_name: Optional[str] = None
     student_full_name: Optional[str] = None
     course_title: Optional[str] = None
+    certificate_url: Optional[str] = None
     issued_at: Optional[str] = None
     expires_at: Optional[str] = None
     score: Optional[float] = None

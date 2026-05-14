@@ -8,26 +8,174 @@ Endpoint'ler:
   GET  /api/v1/exams/{exam_id}/result         → Sınav sonucunu getir
   GET  /api/v1/certificates/{cert_number}/verify → Sertifika doğrula (public)
 
-Mock data kullanılmaktadır.  DB: işaretli satırlar SQLAlchemy ile değiştirilecek.
+Endpointler gerçek PostgreSQL tablolarından beslenir.
 """
 
-from fastapi import APIRouter, HTTPException, Path, status
+from datetime import datetime
+import random
+from typing import Iterable
+from uuid import UUID, uuid4
 
+from fastapi import APIRouter, Depends, HTTPException, Path, status
+from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.database import get_db
 from app.models.exam import (
+    AnswerItem,
+    AnswerResult,
     CertificateVerifyResponse,
+    ChoiceSafe,
+    DifficultyLevel,
     ExamResultResponse,
     ExamSessionResponse,
     ExamSubmitRequest,
     ExamSubmitResponse,
+    QuestionSafe,
+    QuestionType,
+    ScoreBreakdown,
 )
-from app.services.exam_service import (
-    get_exam_result,
-    get_exam_session,
-    grade_exam,
-    verify_certificate,
+from app.models.course_orm import (
+    Certificate,
+    Course,
+    Exam,
+    ExamAttempt,
+    Module,
+    Question,
+    User,
+    UserAnswer,
 )
 
 router = APIRouter(tags=["🎓 Sınavlar & Sertifikalar"])
+
+TEST_STUDENT_EMAIL = "ogrenci@educell.com"
+
+
+def _parse_uuid(value: str, resource_name: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{value}' ID'li {resource_name} bulunamadı.",
+        ) from exc
+
+
+def _get_test_student(db: Session) -> User:
+    student = db.scalar(select(User).where(User.email == TEST_STUDENT_EMAIL))
+    if student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{TEST_STUDENT_EMAIL}' e-postalı öğrenci bulunamadı.",
+        )
+    return student
+
+
+def _now_iso(value: datetime | None = None) -> str:
+    return (value or datetime.now()).isoformat()
+
+
+def _question_type(value: str) -> QuestionType:
+    mapping = {
+        "MULTIPLE_CHOICE": QuestionType.MULTIPLE_CHOICE,
+        "TRUE_FALSE": QuestionType.TRUE_FALSE,
+        "MULTI_SELECT": QuestionType.MULTI_SELECT,
+    }
+    return mapping[value]
+
+
+def _safe_choices(options: Iterable[dict]) -> list[ChoiceSafe]:
+    return [
+        ChoiceSafe(id=str(option.get("id", "")), text=str(option.get("text", "")))
+        for option in options
+    ]
+
+
+def _safe_question(question: Question) -> QuestionSafe:
+    return QuestionSafe(
+        id=str(question.id),
+        text=question.text,
+        question_type=_question_type(question.type),
+        difficulty=DifficultyLevel.EASY,
+        points=1.0,
+        choices=_safe_choices(question.options or []),
+    )
+
+
+def _correct_option_ids(question: Question) -> set[str]:
+    return {
+        str(option.get("id"))
+        for option in question.options or []
+        if option.get("is_correct") is True
+    }
+
+
+def _normalize_selected(values: list[str]) -> list[str]:
+    return [str(value) for value in values]
+
+
+def _score_question(question: Question, selected_values: list[str]) -> tuple[float, bool, bool]:
+    selected = set(_normalize_selected(selected_values))
+    correct = _correct_option_ids(question)
+
+    if not selected:
+        return 0.0, False, False
+
+    if question.type in {"MULTIPLE_CHOICE", "TRUE_FALSE"}:
+        is_correct = len(selected) == 1 and selected == correct
+        return (1.0 if is_correct else 0.0), is_correct, False
+
+    wrong_selected = selected - correct
+    if wrong_selected:
+        return 0.0, False, False
+
+    if not correct:
+        return 1.0, True, False
+
+    earned = len(selected & correct) / len(correct)
+    is_correct = selected == correct
+    is_partial = 0 < earned < 1
+    return round(earned, 4), is_correct, is_partial
+
+
+def _answer_result(
+    question: Question,
+    selected_values: list[str],
+    earned: float,
+    is_correct: bool,
+    is_partial: bool,
+) -> AnswerResult:
+    return AnswerResult(
+        question_id=str(question.id),
+        question_text=question.text,
+        question_type=_question_type(question.type),
+        is_correct=is_correct,
+        is_partial=is_partial,
+        earned_points=earned,
+        max_points=1.0,
+        selected_choices=_normalize_selected(selected_values),
+        correct_choices=sorted(_correct_option_ids(question)),
+        explanation=None,
+    )
+
+
+def _grade_label(percentage: float) -> str:
+    if percentage >= 90:
+        return "AA"
+    if percentage >= 85:
+        return "BA"
+    if percentage >= 75:
+        return "BB"
+    if percentage >= 70:
+        return "CB"
+    if percentage >= 60:
+        return "CC"
+    if percentage >= 50:
+        return "DC"
+    if percentage >= 45:
+        return "DD"
+    return "FF"
 
 
 # ---------------------------------------------------------------------------
@@ -40,17 +188,17 @@ router = APIRouter(tags=["🎓 Sınavlar & Sertifikalar"])
     status_code=status.HTTP_200_OK,
     summary="Sınava Başla",
     description=(
-        "Öğrencinin sınava başlamasını simüle eder. "
+        "Öğrencinin sınava başlamasını gerçek veritabanında kaydeder. "
         "Sorular **karıştırılarak** döner ve **doğru cevaplar kesinlikle gizlenir**. "
-        "\n\nTest için: `exam_001` veya `exam_002`"
     ),
 )
 def start_exam(
     exam_id: str = Path(
         ...,
-        examples=["exam_001"],
+        examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Başlatılacak sınavın ID'si",
     ),
+    db: Session = Depends(get_db),
 ) -> ExamSessionResponse:
     """
     Sınav oturumu başlatır.
@@ -59,16 +207,78 @@ def start_exam(
     - Yanıtta `is_correct` alanı **bulunmaz** (güvenlik).
     - Süre aşımını kontrol etmek client sorumluluğundadır.
     """
-    # DB:  SELECT * FROM exams WHERE id = :exam_id AND is_active = true
-    session = get_exam_session(exam_id)
+    exam_uuid = _parse_uuid(exam_id, "sınav")
+    try:
+        exam = db.get(Exam, exam_uuid)
+        if exam is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"'{exam_id}' ID'li sınav bulunamadı.",
+            )
 
-    if session is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{exam_id}' ID'li sınav bulunamadı.",
+        student = _get_test_student(db)
+        previous_attempt_count = db.scalar(
+            select(func.count())
+            .select_from(ExamAttempt)
+            .where(
+                ExamAttempt.user_id == student.id,
+                ExamAttempt.exam_id == exam.id,
+            )
+        ) or 0
+
+        if previous_attempt_count >= exam.max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Bu sınav için maksimum deneme hakkı doldu.",
+            )
+
+        now = datetime.now()
+        attempt = ExamAttempt(
+            id=uuid4(),
+            user_id=student.id,
+            exam_id=exam.id,
+            started_at=now,
+            finished_at=None,
+            score=None,
+            is_passed=False,
+            attempt_no=previous_attempt_count + 1,
+            created_at=now,
         )
+        db.add(attempt)
 
-    return session
+        questions = list(
+            db.scalars(
+                select(Question)
+                .where(Question.exam_id == exam.id)
+                .order_by(Question.order_index)
+            ).all()
+        )
+        if exam.shuffle:
+            random.shuffle(questions)
+
+        db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sınav başlatılamadı.",
+        ) from exc
+
+    safe_questions = [_safe_question(question) for question in questions]
+    return ExamSessionResponse(
+        attempt_id=str(attempt.id),
+        exam_id=str(exam.id),
+        exam_title=exam.title,
+        time_limit_min=exam.time_limit_min,
+        duration_minutes=exam.time_limit_min,
+        total_questions=len(safe_questions),
+        total_points=float(len(safe_questions)),
+        passing_score=float(exam.passing_score),
+        questions=safe_questions,
+        started_at=_now_iso(attempt.started_at),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -86,47 +296,142 @@ def start_exam(
         "- `multiple_choice`: Doğru şık → tam puan, yanlış → 0\n"
         "- `true_false`: Doğru cevap → tam puan, yanlış → 0\n"
         "- `multi_select`: **Kısmi puanlama** — "
-        "  `kazanılan = (doğru_seçilen / toplam_doğru) × max_puan`\n"
-        "  Yanlış şık seçmek puanı **kırmaz**, sadece kısmi puanı etkiler.\n\n"
-        "Geçme notuna ulaşılırsa yanıtta `certificate_number` üretilir."
+        "  `kazanılan = doğru_seçilen / toplam_doğru`\n"
+        "  Yanlış ekstra şık seçilirse soru puanı 0 olur."
     ),
 )
 def submit_exam(
     exam_id: str = Path(
         ...,
-        examples=["exam_001"],
+        examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Puanlanacak sınavın ID'si",
     ),
     body: ExamSubmitRequest = ...,
+    db: Session = Depends(get_db),
 ) -> ExamSubmitResponse:
     """
     Cevapları değerlendirir; soru bazında sonuç + genel puan dağılımı döner.
 
-    Örnek istek gövdesi (exam_001):
-    ```json
-    {
-      "answers": [
-        {"question_id": "q001", "selected_choices": ["b"]},
-        {"question_id": "q002", "selected_choices": ["c"]},
-        {"question_id": "q003", "selected_choices": ["c"]},
-        {"question_id": "q004", "selected_choices": ["false"]},
-        {"question_id": "q005", "selected_choices": ["true"]},
-        {"question_id": "q006", "selected_choices": ["b", "c", "e"]},
-        {"question_id": "q007", "selected_choices": ["a", "c", "d"]}
-      ]
-    }
-    ```
+    Cevaplar son aktif sınav denemesine kaydedilir.
     """
-    # DB:  SELECT * FROM exams WHERE id = :exam_id
-    result = grade_exam(exam_id, body.answers)
+    exam_uuid = _parse_uuid(exam_id, "sınav")
 
-    if result is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{exam_id}' ID'li sınav bulunamadı.",
+    try:
+        exam = db.get(Exam, exam_uuid)
+        if exam is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"'{exam_id}' ID'li sınav bulunamadı.",
+            )
+
+        student = _get_test_student(db)
+        attempt = db.scalar(
+            select(ExamAttempt)
+            .where(
+                ExamAttempt.user_id == student.id,
+                ExamAttempt.exam_id == exam.id,
+                ExamAttempt.finished_at.is_(None),
+            )
+            .order_by(ExamAttempt.started_at.desc(), ExamAttempt.created_at.desc())
         )
+        if attempt is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Bu sınav için aktif deneme bulunamadı.",
+            )
 
-    return result
+        questions = list(
+            db.scalars(
+                select(Question)
+                .where(Question.exam_id == exam.id)
+                .order_by(Question.order_index)
+            ).all()
+        )
+        answer_map: dict[str, list[str]] = {
+            answer.question_id: answer.selected_choices for answer in body.answers
+        }
+
+        per_question_results: list[AnswerResult] = []
+        total_earned = 0.0
+        correct_count = 0
+        wrong_count = 0
+        partial_count = 0
+        blank_count = 0
+
+        for question in questions:
+            selected = _normalize_selected(answer_map.get(str(question.id), []))
+            earned, is_correct, is_partial = _score_question(question, selected)
+
+            if not selected:
+                blank_count += 1
+            elif is_correct:
+                correct_count += 1
+            elif is_partial:
+                partial_count += 1
+            else:
+                wrong_count += 1
+
+            db.add(
+                UserAnswer(
+                    id=uuid4(),
+                    attempt_id=attempt.id,
+                    question_id=question.id,
+                    selected_options=selected,
+                    is_correct=is_correct,
+                    earned_point=earned,
+                    created_at=datetime.now(),
+                )
+            )
+            total_earned += earned
+            per_question_results.append(
+                _answer_result(question, selected, earned, is_correct, is_partial)
+            )
+
+        total_questions = len(questions)
+        score = round((total_earned / total_questions) * 100, 2) if total_questions else 0.0
+        is_passed = score >= exam.passing_score
+        now = datetime.now()
+        attempt.finished_at = now
+        attempt.score = score
+        attempt.is_passed = is_passed
+        db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sınav cevapları kaydedilemedi.",
+        ) from exc
+
+    breakdown = ScoreBreakdown(
+        correct_count=correct_count,
+        partial_count=partial_count,
+        wrong_count=wrong_count,
+        blank_count=blank_count,
+        total_questions=total_questions,
+        earned_points=round(total_earned, 4),
+        max_points=float(total_questions),
+        percentage_score=score,
+        passed=is_passed,
+    )
+    breakdown_dict = breakdown.model_dump(mode="json")
+    return ExamSubmitResponse(
+        exam_id=str(exam.id),
+        exam_title=exam.title,
+        attempt_id=str(attempt.id),
+        score=score,
+        is_passed=is_passed,
+        correct_count=correct_count,
+        wrong_count=wrong_count,
+        breakdown=breakdown_dict,
+        score_breakdown=breakdown,
+        per_question_results=per_question_results,
+        grade_label=_grade_label(score),
+        certificate_eligible=is_passed,
+        certificate_number=None,
+        submitted_at=_now_iso(now),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,32 +444,132 @@ def submit_exam(
     summary="Sınav Sonucunu Getir",
     description=(
         "Tamamlanmış bir sınav için kayıtlı özet sonucu döner. "
-        "Doğru/yanlış/boş dağılımı ve toplam puan yer alır.\n\n"
-        "Test için: `exam_001` veya `exam_002`"
+        "Doğru/yanlış/boş dağılımı ve cevap detayları yer alır."
     ),
 )
 def get_result(
     exam_id: str = Path(
         ...,
-        examples=["exam_001"],
+        examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Sonucu getirilecek sınavın ID'si",
     ),
+    db: Session = Depends(get_db),
 ) -> ExamResultResponse:
     """
     Sınav özet sonucu.
 
     - Sınav bulunamazsa **404** döner.
     """
-    # DB:  SELECT * FROM exam_results WHERE exam_id = :exam_id ORDER BY completed_at DESC LIMIT 1
-    result = get_exam_result(exam_id)
+    exam_uuid = _parse_uuid(exam_id, "sınav")
 
-    if result is None:
+    try:
+        exam = db.get(Exam, exam_uuid)
+        if exam is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"'{exam_id}' ID'li sınav bulunamadı.",
+            )
+
+        student = _get_test_student(db)
+        attempt = db.scalar(
+            select(ExamAttempt)
+            .where(
+                ExamAttempt.user_id == student.id,
+                ExamAttempt.exam_id == exam.id,
+            )
+            .order_by(ExamAttempt.attempt_no.desc(), ExamAttempt.started_at.desc())
+        )
+        if attempt is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"'{exam_id}' ID'li sınav sonucu bulunamadı.",
+            )
+
+        questions = list(
+            db.scalars(
+                select(Question)
+                .where(Question.exam_id == exam.id)
+                .order_by(Question.order_index)
+            ).all()
+        )
+        answer_rows = db.execute(
+            select(UserAnswer, Question)
+            .join(Question, UserAnswer.question_id == Question.id)
+            .where(UserAnswer.attempt_id == attempt.id)
+            .order_by(Question.order_index)
+        ).all()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{exam_id}' ID'li sınav sonucu bulunamadı.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sınav sonucu veritabanından okunamadı.",
+        ) from exc
+
+    answer_details = [
+        _answer_result(
+            question,
+            answer.selected_options or [],
+            float(answer.earned_point or 0),
+            bool(answer.is_correct),
+            0 < float(answer.earned_point or 0) < 1,
+        )
+        for answer, question in answer_rows
+    ]
+    answered_question_ids = {answer.question_id for answer, _ in answer_rows}
+    correct_count = sum(1 for answer, _ in answer_rows if answer.is_correct is True)
+    wrong_count = sum(
+        1
+        for answer, _ in answer_rows
+        if answer.selected_options and not answer.is_correct and float(answer.earned_point or 0) == 0
+    )
+    blank_count = max(len(questions) - len(answered_question_ids), 0)
+
+    certificate_number = None
+    course_id = db.scalar(
+        select(Module.course_id)
+        .join(Exam, Exam.module_id == Module.id)
+        .where(Exam.id == exam.id)
+    )
+    if course_id is not None:
+        cert = db.scalar(
+            select(Certificate).where(
+                Certificate.user_id == student.id,
+                Certificate.course_id == course_id,
+            )
+        )
+        certificate_number = cert.certificate_number if cert is not None else None
+
+    finished_at = attempt.finished_at
+    duration_taken_minutes = 0
+    if finished_at is not None:
+        duration_taken_minutes = max(
+            int((finished_at - attempt.started_at).total_seconds() // 60),
+            0,
         )
 
-    return result
+    score = float(attempt.score or 0)
+    is_passed = bool(attempt.is_passed)
+    completed_at = _now_iso(finished_at or attempt.started_at)
+    return ExamResultResponse(
+        exam_id=str(exam.id),
+        exam_title=exam.title,
+        student_name=student.full_name,
+        score=score,
+        is_passed=is_passed,
+        passed=is_passed,
+        attempt_no=attempt.attempt_no,
+        started_at=_now_iso(attempt.started_at),
+        finished_at=_now_iso(finished_at) if finished_at else None,
+        correct_count=correct_count,
+        wrong_count=wrong_count,
+        blank_count=blank_count,
+        total_questions=len(questions),
+        duration_taken_minutes=duration_taken_minutes,
+        certificate_number=certificate_number,
+        completed_at=completed_at,
+        answers=answer_details,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -178,27 +583,53 @@ def get_result(
     description=(
         "**Herkese açık** sertifika doğrulama endpoint'i. "
         "Sertifika numarasını alır; ad-soyad, kurs adı ve geçerlilik durumunu döner. "
-        "Kimlik doğrulaması **gerektirmez**.\n\n"
-        "**Test sertifika numaraları:**\n"
-        "- `CERT-2024-001-TC` → Ahmet Yılmaz\n"
-        "- `CERT-2024-002-TC` → Zeynep Arslan\n"
-        "- `CERT-2025-003-TC` → Mehmet Kaya\n"
-        "- `CERT-GECERSIZ-000` → Geçersiz örnek"
+        "Kimlik doğrulaması **gerektirmez**."
     ),
 )
 def verify_cert(
     cert_number: str = Path(
         ...,
-        examples=["CERT-2024-001-TC"],
+        examples=["EDUCELL-2026-0001"],
         description="Doğrulanacak sertifika numarası",
     ),
+    db: Session = Depends(get_db),
 ) -> CertificateVerifyResponse:
     """
     Sertifika doğrulama.
 
     - Geçerli → `is_valid: true` + kişi/kurs bilgisi
-    - Geçersiz → `is_valid: false` + açıklayıcı mesaj
-    - Her durumda **200 OK** döner (404 kullanmıyoruz: doğrulama her zaman yanıt verir).
+    - Geçersiz → **404** döner.
     """
-    # DB:  SELECT * FROM certificates WHERE cert_number = :cert_number
-    return verify_certificate(cert_number)
+    try:
+        row = db.execute(
+            select(Certificate, User, Course)
+            .join(User, Certificate.user_id == User.id)
+            .join(Course, Certificate.course_id == Course.id)
+            .where(Certificate.certificate_number == cert_number)
+        ).one_or_none()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sertifika doğrulama veritabanından okunamadı.",
+        ) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{cert_number}' numaralı sertifika bulunamadı.",
+        )
+
+    certificate, student, course = row
+    return CertificateVerifyResponse(
+        certificate_number=certificate.certificate_number,
+        is_valid=True,
+        student_name=student.full_name,
+        course_name=course.title,
+        student_full_name=student.full_name,
+        course_title=course.title,
+        certificate_url=certificate.certificate_url,
+        issued_at=_now_iso(certificate.issued_at),
+        expires_at=None,
+        score=None,
+        message="Sertifika geçerlidir.",
+    )

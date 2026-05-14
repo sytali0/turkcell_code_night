@@ -9,9 +9,9 @@ takım arkadaşı tarafından ayrıca yazılacak.
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,37 @@ class LessonResponse(LessonBase):
 
 
 # ---------------------------------------------------------------------------
+# Exam & Question (Sınav / Soru)
+# ---------------------------------------------------------------------------
+
+class QuestionResponse(BaseModel):
+    """Sınav sorusu."""
+    id:            str              = Field(..., examples=["que_001"])
+    type:          str              = Field(..., examples=["MULTIPLE_CHOICE"])
+    question_type: str              = Field(..., examples=["MULTIPLE_CHOICE"])
+    text:          str              = Field(..., examples=["Python hangi tür bir dildir?"])
+    options:       list[dict[str, Any]] = Field(default_factory=list)
+    order:         int              = Field(..., ge=1, examples=[1])
+
+    model_config = {"from_attributes": True}
+
+
+class ExamResponse(BaseModel):
+    """Modüle bağlı sınav."""
+    id:             str                    = Field(..., examples=["exm_001"])
+    title:          str                    = Field(..., examples=["Python'a Giriş Sınavı"])
+    description:    str                    = Field(default="")
+    time_limit_min: int                    = Field(..., ge=0)
+    passing_score:  int                    = Field(..., ge=0, le=100)
+    question_count: int                    = Field(..., ge=0)
+    shuffle:        bool                   = False
+    max_attempts:   int                    = Field(..., ge=1)
+    questions:      list[QuestionResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
 # Module (Modül)
 # ---------------------------------------------------------------------------
 
@@ -81,6 +112,7 @@ class ModuleResponse(ModuleBase):
     lesson_count:   int              = Field(..., ge=0, examples=[5])
     total_duration: int              = Field(..., ge=0, description="Modüldeki toplam süre (dakika)")
     lessons:        list[LessonResponse] = Field(default_factory=list)
+    exams:          list[ExamResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -98,9 +130,10 @@ class CourseListItem(BaseModel):
     title:         str           = Field(..., examples=["Python ile Veri Bilimi"])
     description:   str           = Field(..., examples=["Sıfırdan Python öğrenin ve veri bilimi dünyasına adım atın."])
     cover_url:     str           = Field(..., examples=["https://picsum.photos/seed/python/800/450"])
-    category:      CourseCategory
+    category:      str
     level:         CourseLevel
     instructor:    str           = Field(..., examples=["Dr. Ayşe Kaya"])
+    instructor_name: str         = Field(default="", examples=["Dr. Ayşe Kaya"])
     rating:        float         = Field(..., ge=0.0, le=5.0, examples=[4.8])
     student_count: int           = Field(..., ge=0, examples=[1240])
     duration_hours: float        = Field(..., ge=0, examples=[18.5])
@@ -109,6 +142,12 @@ class CourseListItem(BaseModel):
     tags:          list[str]     = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def fill_instructor_name(self) -> "CourseListItem":
+        if not self.instructor_name:
+            self.instructor_name = self.instructor
+        return self
 
 
 # ---------------------------------------------------------------------------
