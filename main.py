@@ -70,6 +70,7 @@ API_V1_PREFIX = "/api/v1"
 app.include_router(auth_router.router, prefix=API_V1_PREFIX)
 app.include_router(course_router.router, prefix=API_V1_PREFIX)
 app.include_router(course_router.lesson_router, prefix=API_V1_PREFIX)
+app.include_router(course_router.cert_router, prefix=API_V1_PREFIX)
 app.include_router(exam_router.router, prefix=API_V1_PREFIX)
 # İleride eklenecek router'lar:
 # app.include_router(users_router.router, prefix=API_V1_PREFIX)
