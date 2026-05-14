@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // ── Axios instance ─────────────────────────────────────────────────────────
-// Base URL: Vite proxy /api → http://localhost:8000/api
+// Base URL: Vite proxy /api → http://127.0.0.1:8000 (uvicorn çalışmalı; yoksa ECONNREFUSED)
 // Token: localStorage'da 'educell_token' anahtarıyla saklı JWT
 // ---------------------------------------------------------------------------
 
