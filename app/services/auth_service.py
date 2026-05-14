@@ -1,18 +1,16 @@
 """
-EduCell - Auth Service (İş Mantığı Katmanı).
-
-Bu dosya şimdilik in-memory mock data ile çalışmaktadır.
-Takım arkadaşı SQLAlchemy entegrasyonunu tamamladığında,
-aşağıdaki mock_users sözlüğü yerine DB sorguları kullanılacak.
-
-Değişmesi gereken tek yer: AuthService metodlarının içindeki
-veri okuma/yazma satırları (# DB: yorumlu satırlar).
+EduCell - Auth Service (PostgreSQL Entegrasyonlu)
+==================================================
+Kullanıcı kayıt ve giriş işlemlerini PostgreSQL'de gerçek User ORM
+tablosu üzerinden yapar. OTP simülasyon kodu: 1234
 """
 
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
+from uuid import uuid4
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import create_access_token
@@ -23,157 +21,97 @@ from app.models.auth import (
     TokenResponse,
     UserResponse,
 )
-
-# ---------------------------------------------------------------------------
-# Mock Veri Deposu
-# Anahtar: telefon_numarası → kullanıcı dict'i
-# ---------------------------------------------------------------------------
-_mock_users: dict[str, dict] = {
-    # Başlangıç test kullanıcısı - Swagger'da hemen deneyebilirsiniz
-    "05001234567": {
-        "id": "usr_demo_001",
-        "phone_number": "05001234567",
-        "full_name": "Demo Kullanıcı",
-        "is_active": True,
-        "role": "student",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-}
+from app.models.course_orm import User
 
 
-def _build_user_response(user_dict: dict) -> UserResponse:
-    """Dict'ten UserResponse Pydantic modeli oluşturur."""
+def _user_to_response(user: User) -> UserResponse:
     return UserResponse(
-        id=user_dict["id"],
-        phone_number=user_dict["phone_number"],
-        full_name=user_dict["full_name"],
-        is_active=user_dict["is_active"],
-        role=user_dict["role"],
+        id=str(user.id),
+        phone_number=user.gsm_number,
+        full_name=user.full_name,
+        is_active=user.is_gsm_verified,
+        role=user.role,
     )
 
 
 class AuthService:
-    """Kimlik doğrulama iş mantığı."""
 
     # ------------------------------------------------------------------
     # Register
     # ------------------------------------------------------------------
     @staticmethod
-    def register(data: RegisterRequest) -> RegisterResponse:
-        """
-        Yeni kullanıcı kaydeder.
-
-        Kurallar:
-        - OTP kodu sabit "1234" olmalı (simülasyon).
-        - Aynı telefon numarası iki kez kayıt olamaz.
-        """
+    def register(data: RegisterRequest, db: Session) -> RegisterResponse:
         # 1. OTP doğrulama
         if data.otp_code != settings.MOCK_OTP_CODE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "success": False,
-                    "code": "INVALID_OTP",
-                    "message": "Girdiğiniz OTP kodu hatalı. Simülasyonda doğru kod: 1234",
-                },
+                detail="Girdiğiniz OTP kodu hatalı. Demo kodu: 1234",
             )
 
-        # 2. Tekrar kayıt kontrolü
-        # DB: db.query(User).filter(User.phone_number == data.phone_number).first()
-        if data.phone_number in _mock_users:
+        # 2. Telefon numarası zaten kayıtlı mı?
+        existing = db.scalar(select(User).where(User.gsm_number == data.phone_number))
+        if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "success": False,
-                    "code": "PHONE_ALREADY_EXISTS",
-                    "message": f"{data.phone_number} numaralı telefon zaten kayıtlı.",
-                },
+                detail=f"{data.phone_number} numaralı telefon zaten kayıtlı.",
             )
 
-        # 3. Kullanıcı oluştur
-        new_user: dict = {
-            "id": f"usr_{uuid.uuid4().hex[:8]}",
-            "phone_number": data.phone_number,
-            "full_name": data.full_name,
-            "is_active": True,
-            "role": "student",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # DB: db.add(User(**new_user)); db.commit(); db.refresh(user)
-        _mock_users[data.phone_number] = new_user
+        # 3. Yeni kullanıcı oluştur
+        now = datetime.now()
+        new_user = User(
+            id=uuid4(),
+            full_name=data.full_name,
+            gsm_number=data.phone_number,
+            email=None,
+            password_hash=None,
+            role="student",
+            bio=None,
+            expertise=None,
+            interests=None,
+            is_gsm_verified=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
 
         return RegisterResponse(
             success=True,
             message=f"Kayıt başarılı! Hoş geldin, {data.full_name} 🎓",
-            user=_build_user_response(new_user),
+            user=_user_to_response(new_user),
         )
 
     # ------------------------------------------------------------------
     # Login
     # ------------------------------------------------------------------
     @staticmethod
-    def login(data: LoginRequest) -> TokenResponse:
-        """
-        Kullanıcı girişi yapar ve JWT token döner.
-
-        Kurallar:
-        - OTP kodu sabit "1234" olmalı (simülasyon).
-        - Telefon numarası kayıtlı olmalı.
-        - Kullanıcı aktif olmalı.
-        """
+    def login(data: LoginRequest, db: Session) -> TokenResponse:
         # 1. OTP doğrulama
         if data.otp_code != settings.MOCK_OTP_CODE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "success": False,
-                    "code": "INVALID_OTP",
-                    "message": "Girdiğiniz OTP kodu hatalı. Simülasyonda doğru kod: 1234",
-                },
+                detail="Girdiğiniz OTP kodu hatalı. Demo kodu: 1234",
             )
 
         # 2. Kullanıcı arama
-        # DB: user = db.query(User).filter(User.phone_number == data.phone_number).first()
-        user_dict = _mock_users.get(data.phone_number)
-
-        if not user_dict:
-            # Güvenlik: kayıtlı mı değil mi bilgisi saldırganla paylaşılmaz
+        user = db.scalar(select(User).where(User.gsm_number == data.phone_number))
+        if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "success": False,
-                    "code": "INVALID_CREDENTIALS",
-                    "message": "Telefon numarası veya OTP kodu hatalı.",
-                },
+                detail="Bu telefon numarası kayıtlı değil. Önce kayıt olun.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # 3. Aktiflik kontrolü
-        if not user_dict["is_active"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "success": False,
-                    "code": "USER_INACTIVE",
-                    "message": "Hesabınız askıya alınmış. Lütfen destek ekibiyle iletişime geçin.",
-                },
-            )
-
-        # 4. JWT oluştur
+        # 3. JWT oluştur (sub = gsm_number, token'da phone ile user bulunacak)
         token = create_access_token(
-            subject=user_dict["phone_number"],
-            extra_data={
-                "user_id": user_dict["id"],
-                "role": user_dict["role"],
-            },
+            subject=user.gsm_number,
+            extra_data={"user_id": str(user.id), "role": user.role},
         )
-
-        expire_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
         return TokenResponse(
             access_token=token,
             token_type="bearer",
-            expires_in=expire_seconds,
-            user=_build_user_response(user_dict),
+            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user=_user_to_response(user),
         )

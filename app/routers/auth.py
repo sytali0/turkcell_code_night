@@ -1,11 +1,12 @@
 """
 EduCell - Auth Router.
-
 /api/v1/auth prefix'i altındaki tüm kimlik doğrulama endpoint'leri.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
 from app.models.auth import (
     LoginRequest,
     RegisterRequest,
@@ -26,24 +27,18 @@ router = APIRouter(
     status_code=201,
     summary="Yeni kullanıcı kaydı",
     description="""
-Telefon numarası ve OTP kodu ile yeni kullanıcı kaydeder.
+Telefon numarası ve OTP kodu ile yeni kullanıcı kaydeder (PostgreSQL).
 
-**Simülasyon Notu:** OTP kodu her zaman **1234** kabul edilir.
-Gerçek SMS entegrasyonu ilerleyen sprintlerde eklenecek.
+**Demo OTP:** `1234`
 
-**Örnek İstek:**
+**Örnek:**
 ```json
-{
-  "phone_number": "05321234567",
-  "otp_code": "1234",
-  "full_name": "Ali Yılmaz"
-}
+{"phone_number": "05321234567", "otp_code": "1234", "full_name": "Ali Yılmaz"}
 ```
 """,
 )
-def register(payload: RegisterRequest) -> RegisterResponse:
-    """Yeni kullanıcı kayıt endpoint'i."""
-    return AuthService.register(payload)
+def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> RegisterResponse:
+    return AuthService.register(payload, db)
 
 
 @router.post(
@@ -51,16 +46,10 @@ def register(payload: RegisterRequest) -> RegisterResponse:
     response_model=TokenResponse,
     summary="Kullanıcı girişi (OTP ile)",
     description="""
-Kayıtlı telefon numarası ve OTP kodu ile giriş yapar.
-Başarılı girişte **Bearer JWT token** döner.
+Kayıtlı telefon numarası ve OTP kodu ile giriş. **Bearer JWT** döner.
 
-**Simülasyon Notu:** OTP kodu her zaman **1234** kabul edilir.
-
-**Hazır test kullanıcısı:**
-- Telefon: `05001234567`
-- OTP: `1234`
+**Demo OTP:** `1234`
 """,
 )
-def login(payload: LoginRequest) -> TokenResponse:
-    """Kullanıcı giriş endpoint'i."""
-    return AuthService.login(payload)
+def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    return AuthService.login(payload, db)

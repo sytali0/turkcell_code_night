@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.deps import get_current_user
 from app.database import get_db
 from app.models.exam import (
     AnswerItem,
@@ -49,8 +50,6 @@ from app.models.course_orm import (
 
 router = APIRouter(tags=["🎓 Sınavlar & Sertifikalar"])
 
-TEST_STUDENT_EMAIL = "ogrenci@educell.com"
-
 
 def _parse_uuid(value: str, resource_name: str) -> UUID:
     try:
@@ -60,16 +59,6 @@ def _parse_uuid(value: str, resource_name: str) -> UUID:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"'{value}' ID'li {resource_name} bulunamadı.",
         ) from exc
-
-
-def _get_test_student(db: Session) -> User:
-    student = db.scalar(select(User).where(User.email == TEST_STUDENT_EMAIL))
-    if student is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{TEST_STUDENT_EMAIL}' e-postalı öğrenci bulunamadı.",
-        )
-    return student
 
 
 def _now_iso(value: datetime | None = None) -> str:
@@ -198,6 +187,7 @@ def start_exam(
         examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Başlatılacak sınavın ID'si",
     ),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ExamSessionResponse:
     """
@@ -216,20 +206,36 @@ def start_exam(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = _get_test_student(db)
-        previous_attempt_count = db.scalar(
+        student = current_user
+        # Yalnızca tamamlanmış girişimleri say (finished_at dolu olanlar)
+        finished_attempt_count = db.scalar(
             select(func.count())
             .select_from(ExamAttempt)
             .where(
                 ExamAttempt.user_id == student.id,
                 ExamAttempt.exam_id == exam.id,
+                ExamAttempt.finished_at.isnot(None),
             )
         ) or 0
 
-        if previous_attempt_count >= exam.max_attempts:
+        # Yarım kalmış (açık) girişim varsa onu kapat
+        open_attempt = db.scalar(
+            select(ExamAttempt)
+            .where(
+                ExamAttempt.user_id == student.id,
+                ExamAttempt.exam_id == exam.id,
+                ExamAttempt.finished_at.is_(None),
+            )
+        )
+        if open_attempt is not None:
+            open_attempt.finished_at = datetime.now()
+            db.flush()
+            finished_attempt_count += 1
+
+        if finished_attempt_count >= exam.max_attempts:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Bu sınav için maksimum deneme hakkı doldu.",
+                detail=f"Bu sınav için maksimum deneme hakkı ({exam.max_attempts}) doldu.",
             )
 
         now = datetime.now()
@@ -241,7 +247,7 @@ def start_exam(
             finished_at=None,
             score=None,
             is_passed=False,
-            attempt_no=previous_attempt_count + 1,
+            attempt_no=finished_attempt_count + 1,
             created_at=now,
         )
         db.add(attempt)
@@ -307,6 +313,7 @@ def submit_exam(
         description="Puanlanacak sınavın ID'si",
     ),
     body: ExamSubmitRequest = ...,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ExamSubmitResponse:
     """
@@ -324,7 +331,7 @@ def submit_exam(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = _get_test_student(db)
+        student = current_user
         attempt = db.scalar(
             select(ExamAttempt)
             .where(
@@ -337,7 +344,7 @@ def submit_exam(
         if attempt is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Bu sınav için aktif deneme bulunamadı.",
+                detail="Bu sınav için aktif deneme bulunamadı. Önce sınavı başlatın.",
             )
 
         questions = list(
@@ -453,6 +460,7 @@ def get_result(
         examples=["2a1ed4a8-f3e5-4b2f-87a9-7368aa91470c"],
         description="Sonucu getirilecek sınavın ID'si",
     ),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ExamResultResponse:
     """
@@ -470,19 +478,20 @@ def get_result(
                 detail=f"'{exam_id}' ID'li sınav bulunamadı.",
             )
 
-        student = _get_test_student(db)
+        student = current_user
         attempt = db.scalar(
             select(ExamAttempt)
             .where(
                 ExamAttempt.user_id == student.id,
                 ExamAttempt.exam_id == exam.id,
+                ExamAttempt.finished_at.isnot(None),
             )
             .order_by(ExamAttempt.attempt_no.desc(), ExamAttempt.started_at.desc())
         )
         if attempt is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"'{exam_id}' ID'li sınav sonucu bulunamadı.",
+                detail=f"'{exam_id}' için tamamlanmış sınav bulunamadı.",
             )
 
         questions = list(
