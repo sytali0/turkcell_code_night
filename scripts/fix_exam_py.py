@@ -1,77 +1,43 @@
-"""
-2.4 - exam.py patch script:
-  submit_exam endpoint'inde sinav gecilince check_course_completion cagir.
-"""
+import os
 
 path = "app/routers/exam.py"
 content = open(path, "r", encoding="utf-8").read()
 
-# Import ekle (eger yoksa)
-old_imports_end = "from app.models.course_orm import (\n    Certificate,\n    Course,\n    Enrollment,\n    Exam,\n    ExamAttempt,\n    Module,\n    Question,\n    User,\n    UserAnswer,\n)"
+# 1. Ensure Lesson is imported
+if "Lesson," not in content and "Lesson" not in content[:1000]:
+    content = content.replace("Module,\n", "Lesson,\n    Module,\n", 1)
 
-new_imports_end = (
-    "from app.models.course_orm import (\n"
-    "    Certificate,\n"
-    "    Course,\n"
-    "    Enrollment,\n"
-    "    Exam,\n"
-    "    ExamAttempt,\n"
-    "    Module,\n"
-    "    Question,\n"
-    "    User,\n"
-    "    UserAnswer,\n"
-    ")\n"
-    "from app.services.progress_service import check_course_completion"
-)
+# 2. Add the check in _require_student_exam_access
+old_block = """    unlocked, reason = _is_module_unlocked_for_student(db, module, user)
+    if not unlocked:
+        raise HTTPException(status_code=403, detail=reason)
 
-if "from app.services.progress_service" not in content:
-    if old_imports_end in content:
-        content = content.replace(old_imports_end, new_imports_end, 1)
-        print("[OK] Import eklendi.")
-    else:
-        print("[WARN] Import blogu bulunamadi, atlanıyor.")
+    return module, course"""
+
+new_block = """    unlocked, reason = _is_module_unlocked_for_student(db, module, user)
+    if not unlocked:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # CHECK LESSONS ARE COMPLETED
+    from sqlalchemy import text
+    total_lessons = db.scalar(select(func.count()).select_from(Lesson).where(Lesson.module_id == module.id)) or 0
+    if total_lessons > 0:
+        completed = db.scalar(
+            text(
+                "SELECT COUNT(*) FROM lesson_completions lc "
+                "JOIN lessons l ON lc.lesson_id = l.id "
+                "WHERE l.module_id = :module_id AND lc.user_id = :user_id"
+            ),
+            {"module_id": str(module.id), "user_id": str(user.id)}
+        ) or 0
+        if completed < total_lessons:
+            raise HTTPException(status_code=403, detail="Bu modulun sinavina girebilmek icin once moduldeki tum dersleri tamamlamalisiniz.")
+
+    return module, course"""
+
+if old_block in content and "Bu modulun sinavina girebilmek" not in content:
+    content = content.replace(old_block, new_block, 1)
+    open(path, "w", encoding="utf-8").write(content)
+    print("[OK] Backend check added.")
 else:
-    print("[OK] Import zaten mevcut.")
-
-# submit_exam sonrasinda - db.commit() sonra kurs tamamlama kontrolü ekle
-# "attempt.is_passed = is_passed\n        db.commit()" aradigimiz parca
-old_submit_end = (
-    "        attempt.finished_at = now\n"
-    "        attempt.score = score\n"
-    "        attempt.is_passed = is_passed\n"
-    "        db.commit()\n"
-    "    except HTTPException:\n"
-    "        raise\n"
-    "    except SQLAlchemyError as exc:\n"
-    "        db.rollback()\n"
-    "        raise HTTPException(status_code=500, detail=\"Sinav cevaplari kaydedilemedi.\") from exc\n"
-)
-
-new_submit_end = (
-    "        attempt.finished_at = now\n"
-    "        attempt.score = score\n"
-    "        attempt.is_passed = is_passed\n"
-    "        db.commit()\n"
-    "\n"
-    "        # 2.4: Sinav gecilince kurs tamamlanma kontrol et\n"
-    "        if is_passed:\n"
-    "            try:\n"
-    "                _module, _course = _exam_context(db, exam)\n"
-    "                check_course_completion(db, current_user.id, _course.id)\n"
-    "            except Exception:\n"
-    "                pass  # Sertifika hatasi sinav gonderimi etkilememeli\n"
-    "    except HTTPException:\n"
-    "        raise\n"
-    "    except SQLAlchemyError as exc:\n"
-    "        db.rollback()\n"
-    "        raise HTTPException(status_code=500, detail=\"Sinav cevaplari kaydedilemedi.\") from exc\n"
-)
-
-if old_submit_end in content:
-    content = content.replace(old_submit_end, new_submit_end, 1)
-    print("[OK] submit_exam patch uygulandı.")
-else:
-    print("[WARN] submit_exam blogu bulunamadi.")
-
-open(path, "w", encoding="utf-8").write(content)
-print("Done.")
+    print("[WARN] Block not found or already patched.")
