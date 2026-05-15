@@ -8,6 +8,7 @@ import {
   Menu,
   X,
   ChevronDown,
+  Award,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -23,11 +24,17 @@ export default function Navbar() {
     navigate('/login');
   };
 
-  const navLinks = [
-    { to: '/', label: 'Kurslar', icon: BookOpen },
-  ];
+  // Role-based nav links
+  const navLinks = user?.role === 'student'
+    ? [
+        { to: '/courses', label: 'Kurslar', icon: BookOpen },
+        { to: '/certificates', label: 'Sertifikalarım', icon: Award },
+      ]
+    : [
+        { to: '/', label: 'Kurslar', icon: BookOpen },
+      ];
 
-  const isActive = (path) => location.pathname === path;
+  const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
 
   return (
     <nav

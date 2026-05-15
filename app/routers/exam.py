@@ -43,6 +43,7 @@ from app.models.course_orm import (
     User,
     UserAnswer,
 )
+from app.services.progress_service import check_course_completion
 
 router = APIRouter(tags=["Sinavlar & Degerlendirme"])
 
@@ -908,6 +909,14 @@ def submit_exam(
         attempt.score = score
         attempt.is_passed = is_passed
         db.commit()
+
+        # 2.4: Sinav gecilince kurs tamamlanma kontrol et
+        if is_passed:
+            try:
+                _module, _course = _exam_context(db, exam)
+                check_course_completion(db, current_user.id, _course.id)
+            except Exception:
+                pass  # Sertifika hatasi sinav gonderimi etkilememeli
     except HTTPException:
         raise
     except SQLAlchemyError as exc:

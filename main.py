@@ -72,6 +72,7 @@ app.include_router(course_router.router, prefix=API_V1_PREFIX)
 app.include_router(course_router.content_router, prefix=API_V1_PREFIX)
 app.include_router(course_router.lesson_router, prefix=API_V1_PREFIX)
 app.include_router(course_router.cert_router, prefix=API_V1_PREFIX)
+app.include_router(course_router.comment_router, prefix=API_V1_PREFIX)  # 2.5
 app.include_router(exam_router.router, prefix=API_V1_PREFIX)
 # İleride eklenecek router'lar:
 # app.include_router(users_router.router, prefix=API_V1_PREFIX)

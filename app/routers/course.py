@@ -38,7 +38,8 @@ from app.models.course import (
     ModuleResponse,
     QuestionResponse,
 )
-from app.models.course_orm import Certificate, Course, Enrollment, Exam, ExamAttempt, Lesson, Module, Question, User
+from app.models.course_orm import Certificate, Course, CourseReview, Enrollment, Exam, ExamAttempt, Lesson, LessonComment, Module, Question, User
+from app.services.progress_service import check_course_completion
 
 router = APIRouter(prefix="/courses", tags=["📚 Kurslar"])
 
@@ -128,6 +129,18 @@ def _course_student_count(db: Session, course_id: UUID) -> int:
     ) or 0
 
 
+def _course_avg_rating(db: Session, course_id: UUID) -> float:
+    """2.5: course_reviews tablosundan gerçek ortalama puan hesapla."""
+    from sqlalchemy import func as sqlfunc
+    result = db.execute(
+        select(
+            sqlfunc.avg(CourseReview.rating).label("avg_rating"),
+        ).where(CourseReview.course_id == course_id)
+    ).one()
+    avg = result.avg_rating
+    return round(float(avg), 1) if avg is not None else 0.0
+
+
 def _course_enrolled(db: Session, course_id: UUID, user: Optional[User]) -> bool:
     if user is None:
         return False
@@ -160,7 +173,7 @@ def _course_to_item(
         instructor_name=instructor_name,
         instructor_id=str(course.instructor_id),
         instructorId=str(course.instructor_id),
-        rating=0.0,
+        rating=_course_avg_rating(db, course.id),
         student_count=_course_student_count(db, course.id),
         duration_hours=round(duration_min / 60, 2),
         estimatedDuration=duration_min,
@@ -525,6 +538,21 @@ def rate_course(
     if course is None:
         raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
 
+    # 2.5: Sadece student puanlayabilir; kayitli olmalidir
+    _require_role(current_user, "student")
+    enrollment = db.scalar(
+        select(Enrollment).where(
+            Enrollment.user_id == current_user.id,
+            Enrollment.course_id == course_uuid,
+            Enrollment.status.in_(["active", "completed"]),
+        )
+    )
+    if enrollment is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Bu kursu değlendirmek için kayıtlı olmalısınız.",
+        )
+
     try:
         from sqlalchemy import text
 
@@ -585,7 +613,28 @@ def complete_lesson(
     if lesson is None:
         raise HTTPException(status_code=404, detail="Ders bulunamadı.")
 
-    # lesson_completions tablosuna kaydet (varsa)
+    # 2.4: Sadece student rolü tamamlayabilir
+    _require_role(current_user, "student")
+
+    # 2.4: Öğrenci bu derse ait kursa kayıtlı olmalı
+    module = db.get(Module, lesson.module_id)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Ders modülü bulunamadı.")
+
+    enrollment = db.scalar(
+        select(Enrollment).where(
+            Enrollment.user_id == current_user.id,
+            Enrollment.course_id == module.course_id,
+            Enrollment.status.in_(["active", "completed"]),
+        )
+    )
+    if enrollment is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Bu dersi tamamlamak için kursa kayıtlı olmalısınız.",
+        )
+
+    # lesson_completions tablosuna kaydet — duplicate kabul etme
     try:
         from sqlalchemy import text
         db.execute(
@@ -604,6 +653,13 @@ def complete_lesson(
         db.commit()
     except Exception:
         db.rollback()
+        raise HTTPException(status_code=500, detail="Ders tamamlama kaydedilemedi.")
+
+    # 2.4: Kurs tamamlanma kontrolü — ayrı try-except (ders kaydını etkilemez)
+    try:
+        check_course_completion(db, current_user.id, module.course_id)
+    except Exception:
+        pass  # Sertifika oluşturma hatası ders tamamlamayı engellememeli
 
     return LessonCompleteResponse(
         success=True,
@@ -636,6 +692,23 @@ def add_comment(
     lesson = db.get(Lesson, lesson_uuid)
     if lesson is None:
         raise HTTPException(status_code=404, detail="Ders bulunamadı.")
+
+    # 2.5: Student sadece kayitli oldugu kursa yorum yazabilir
+    if current_user.role == "student":
+        module = db.get(Module, lesson.module_id)
+        if module:
+            enrolled = db.scalar(
+                select(Enrollment).where(
+                    Enrollment.user_id == current_user.id,
+                    Enrollment.course_id == module.course_id,
+                    Enrollment.status.in_(["active", "completed"]),
+                )
+            )
+            if enrolled is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Bu derse yorum yazmak için kursa kayıtlı olmalısınız.",
+                )
 
     comment_id = str(uuid4())
     now = datetime.now()
@@ -782,6 +855,7 @@ def get_progress(
         mod_total = len(lessons)
 
         completed_rows = 0
+        completed_lesson_ids_list = []
         if mod_total > 0 and lesson_ids:
             from sqlalchemy import text
             try:
@@ -791,7 +865,9 @@ def get_progress(
                         text("SELECT COUNT(*) FROM lesson_completions WHERE user_id=:uid AND lesson_id=:lid"),
                         {"uid": str(current_user.id), "lid": str(lid)},
                     ).scalar() or 0
-                    completed_rows += min(cnt, 1)
+                    if cnt > 0:
+                        completed_rows += 1
+                        completed_lesson_ids_list.append(str(lid))
             except Exception:
                 completed_rows = 0
 
@@ -819,6 +895,7 @@ def get_progress(
             "title": mod.title,
             "total_lessons": mod_total,
             "completed_lessons": completed_rows,
+            "completed_lesson_ids": completed_lesson_ids_list,
             "progress_percent": pct,
             "exam_passed": exam_passed,
         })
@@ -834,19 +911,12 @@ def get_progress(
         )
     )
 
-    # Kurs tamamlandıysa otomatik sertifika oluştur
+    # 2.4: Kurs tamamlandıysa sertifika oluştur (EDUCELL-YYYY-XXXXXX formatı)
     if is_completed and not cert:
-        cert_no = "EDU-" + secrets.token_hex(4).upper()
-        cert = Certificate(
-            id=uuid4(),
-            user_id=current_user.id,
-            course_id=course_uuid,
-            certificate_number=cert_no,
-            certificate_url=None,
-            issued_at=datetime.now(),
-        )
-        db.add(cert)
-        db.commit()
+        try:
+            cert = check_course_completion(db, current_user.id, course_uuid)
+        except Exception:
+            pass  # Sertifika hatası progress endpoint'ini engellememeli
 
     # Enrollment progress_percent güncelle
     enrollment = db.scalar(
@@ -878,6 +948,131 @@ def get_progress(
 # ===========================================================================
 
 cert_router = APIRouter(prefix="/certificates", tags=["🏆 Sertifikalar"])
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/certificates/my  — Öğrencinin Sertifikaları (2.4)
+# NOT: /my sabit path, /{number} dinamikten ÖNCE tanımlanmalı
+# ---------------------------------------------------------------------------
+
+class CertificateItem(BaseModel):
+    id: str
+    certificate_number: str
+    course_id: str
+    course_name: str
+    user_name: str
+    issued_at: str
+
+
+@cert_router.get(
+    "/my",
+    response_model=list[CertificateItem],
+    summary="Sertifikalarım (Öğrenci)",
+)
+def my_certificates(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[CertificateItem]:
+    _require_role(current_user, "student")
+    rows = db.execute(
+        select(Certificate, Course)
+        .join(Course, Certificate.course_id == Course.id)
+        .where(Certificate.user_id == current_user.id)
+        .order_by(Certificate.issued_at.desc())
+    ).all()
+    return [
+        CertificateItem(
+            id=str(cert.id),
+            certificate_number=cert.certificate_number,
+            course_id=str(cert.course_id),
+            course_name=course.title,
+            user_name=current_user.full_name,
+            issued_at=cert.issued_at.isoformat(),
+        )
+        for cert, course in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/certificates/verify/{certificate_number}  — Public Doğrulama (2.4)
+# Sabit segment /verify/ önce tanımlanmalı
+# ---------------------------------------------------------------------------
+
+class CertVerifyResponseV2(BaseModel):
+    valid: bool
+    certificateNumber: Optional[str] = None
+    userName: Optional[str] = None
+    courseName: Optional[str] = None
+    issuedAt: Optional[str] = None
+    message: str
+
+
+@cert_router.get(
+    "/verify/{certificate_number}",
+    response_model=CertVerifyResponseV2,
+    summary="Sertifika Doğrula (Public)",
+    description="JWT gerektirmez. Sertifika numarası ile geçerliliği kontrol et.",
+)
+def verify_certificate_v2(
+    certificate_number: str = Path(...),
+    db: Session = Depends(get_db),
+) -> CertVerifyResponseV2:
+    cert = db.scalar(
+        select(Certificate).where(Certificate.certificate_number == certificate_number)
+    )
+    if not cert:
+        return CertVerifyResponseV2(
+            valid=False,
+            certificateNumber=certificate_number,
+            message="Sertifika bulunamadı veya geçersiz.",
+        )
+    user = db.get(User, cert.user_id)
+    course = db.get(Course, cert.course_id)
+    return CertVerifyResponseV2(
+        valid=True,
+        certificateNumber=certificate_number,
+        userName=user.full_name if user else None,
+        courseName=course.title if course else None,
+        issuedAt=cert.issued_at.isoformat(),
+        message="✅ Sertifika geçerlidir.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/certificates/{certificate_number}  — Sertifika Detayı (2.4)
+# Dinamik path — /my ve /verify/... den SONRA
+# ---------------------------------------------------------------------------
+
+@cert_router.get(
+    "/{certificate_number}",
+    response_model=CertificateItem,
+    summary="Sertifika Detayı",
+)
+def get_certificate(
+    certificate_number: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CertificateItem:
+    row = db.execute(
+        select(Certificate, Course)
+        .join(Course, Certificate.course_id == Course.id)
+        .where(Certificate.certificate_number == certificate_number)
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sertifika bulunamadı.")
+    cert, course = row
+    # Öğrenci sadece kendi sertifikasını görebilir
+    if current_user.role == "student" and cert.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Bu sertifikayı görme yetkiniz yok.")
+    user = db.get(User, cert.user_id)
+    return CertificateItem(
+        id=str(cert.id),
+        certificate_number=cert.certificate_number,
+        course_id=str(cert.course_id),
+        course_name=course.title,
+        user_name=user.full_name if user else "",
+        issued_at=cert.issued_at.isoformat(),
+    )
 
 
 content_router = APIRouter(tags=["Kurs İçerik Yönetimi"])
@@ -1120,43 +1315,442 @@ def create_lesson(
     }
 
 
-class CertVerifyResponse(BaseModel):
-    valid: bool
-    certificate_number: str
-    holder_name: Optional[str] = None
-    course_title: Optional[str] = None
-    issued_at: Optional[str] = None
-    message: str
+# ===========================================================================
+# Admin Sertifika Listesi  — content_router altında (2.4)
+# ===========================================================================
 
-
-@cert_router.get(
-    "/{certificate_number}/verify",
-    response_model=CertVerifyResponse,
-    summary="Sertifika Doğrula (Public)",
-    description="JWT gerektirmez. Sertifika numarası ile sertifikanın geçerliliğini kontrol et.",
-)
-def verify_certificate(
-    certificate_number: str = Path(...),
+@content_router.get("/admin/certificates")
+def admin_list_certificates(
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> CertVerifyResponse:
-    cert = db.scalar(
-        select(Certificate).where(Certificate.certificate_number == certificate_number)
-    )
-    if not cert:
-        return CertVerifyResponse(
-            valid=False,
-            certificate_number=certificate_number,
-            message="Bu sertifika numarası geçerli değil veya bulunamadı.",
+) -> dict:
+    _require_role(current_user, "admin")
+    rows = db.execute(
+        select(Certificate, User, Course)
+        .join(User, Certificate.user_id == User.id)
+        .join(Course, Certificate.course_id == Course.id)
+        .order_by(Certificate.issued_at.desc())
+    ).all()
+    items = [
+        {
+            "id": str(cert.id),
+            "certificateNumber": cert.certificate_number,
+            "userName": user.full_name,
+            "courseName": course.title,
+            "courseId": str(course.id),
+            "issuedAt": cert.issued_at.isoformat(),
+        }
+        for cert, user, course in rows
+    ]
+    return {"total": len(items), "certificates": items}
+
+
+# ===========================================================================
+# Eğitmen Kurs İlerleme Özeti  — content_router altında (2.4)
+# ===========================================================================
+
+@content_router.get("/instructor/courses/{course_id}/progress-summary")
+def instructor_course_progress_summary(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "instructor", "admin")
+    course_uuid = _parse_uuid(course_id, "kurs")
+    course = db.get(Course, course_uuid)
+    if course is None:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+    _require_owner_or_admin(course, current_user)
+
+    enrollments = db.scalars(
+        select(Enrollment).where(
+            Enrollment.course_id == course_uuid,
         )
+    ).all()
 
-    user = db.get(User, cert.user_id)
-    course = db.get(Course, cert.course_id)
-
-    return CertVerifyResponse(
-        valid=True,
-        certificate_number=certificate_number,
-        holder_name=user.full_name if user else None,
-        course_title=course.title if course else None,
-        issued_at=cert.issued_at.isoformat(),
-        message="✅ Sertifika geçerlidir.",
+    total_enrolled = len(enrollments)
+    total_completed = sum(1 for e in enrollments if e.status == "completed")
+    avg_progress = (
+        round(sum(e.progress_percent for e in enrollments) / total_enrolled, 1)
+        if total_enrolled > 0
+        else 0
     )
+
+    return {
+        "courseId": course_id,
+        "courseTitle": course.title,
+        "totalEnrolled": total_enrolled,
+        "totalCompleted": total_completed,
+        "averageProgressPercent": avg_progress,
+    }
+
+
+# ===========================================================================
+# 2.5 ETKİLEŞİM — Yeni Endpoint'ler
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/lessons/{lesson_id}/comments  — Yorum Listesi
+# parent_comment_id NULL → ana yorum; dolu → cevap
+# ---------------------------------------------------------------------------
+
+@lesson_router.get(
+    "/{lesson_id}/comments",
+    summary="Ders Yorumlarını Listele (2.5)",
+    tags=["💬 Yorumlar"],
+)
+def list_comments(
+    lesson_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    try:
+        lesson_uuid = UUID(lesson_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Ders bulunamadı.")
+
+    # Ana yorumları çek (parent_comment_id IS NULL)
+    comments = db.scalars(
+        select(LessonComment)
+        .where(
+            LessonComment.lesson_id == lesson_uuid,
+            LessonComment.parent_comment_id.is_(None),
+        )
+        .order_by(LessonComment.created_at.asc())
+    ).all()
+
+    result = []
+    for comment in comments:
+        author = db.get(User, comment.user_id)
+        # Cevapları çek
+        replies = db.scalars(
+            select(LessonComment)
+            .where(LessonComment.parent_comment_id == comment.id)
+            .order_by(LessonComment.created_at.asc())
+        ).all()
+
+        reply_list = []
+        for reply in replies:
+            reply_author = db.get(User, reply.user_id)
+            reply_list.append({
+                "id": str(reply.id),
+                "content": reply.content,
+                "authorName": reply_author.full_name if reply_author else "Kullanıcı",
+                "authorRole": reply_author.role if reply_author else "student",
+                "isInstructorReply": (reply_author.role == "instructor") if reply_author else False,
+                "createdAt": reply.created_at.isoformat(),
+            })
+
+        result.append({
+            "id": str(comment.id),
+            "content": comment.content,
+            "authorId": str(comment.user_id),
+            "authorName": author.full_name if author else "Kullanıcı",
+            "authorRole": author.role if author else "student",
+            "isOwn": str(comment.user_id) == str(current_user.id),
+            "createdAt": comment.created_at.isoformat(),
+            "replies": reply_list,
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/comments/{comment_id}/reply  — Eğitmen Cevabı (2.5)
+# Sadece instructor kendi kursundaki yorumlara cevap verebilir
+# ---------------------------------------------------------------------------
+
+@lesson_router.post(
+    "/{comment_id}/reply",  # /lessons/{comment_id}/reply olarak tanımlı olacak
+    status_code=201,
+    summary="Yoruma Cevap Ver — Eğitmen (2.5)",
+    tags=["💬 Yorumlar"],
+    include_in_schema=False,  # ayrı router'da expose edilecek
+)
+def _placeholder_reply():
+    pass  # aşağıda comment_router tanımlanıyor
+
+
+# ---------------------------------------------------------------------------
+# comment_router — /comments prefix'i
+# ---------------------------------------------------------------------------
+
+comment_router = APIRouter(prefix="/comments", tags=["💬 Yorumlar"])
+
+
+@comment_router.post(
+    "/{comment_id}/reply",
+    status_code=201,
+    summary="Yoruma Cevap Ver — Eğitmen (2.5)",
+)
+def reply_comment(
+    body: "CommentRequest",
+    comment_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "instructor", "admin")
+
+    try:
+        comment_uuid = UUID(comment_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Yorum bulunamadı.")
+
+    parent = db.get(LessonComment, comment_uuid)
+    if parent is None or parent.parent_comment_id is not None:
+        raise HTTPException(status_code=404, detail="Ana yorum bulunamadı.")
+
+    # Instructor kendi kursundaki yorumlara cevap verebilir
+    if current_user.role == "instructor":
+        lesson = db.get(Lesson, parent.lesson_id)
+        if lesson:
+            module = db.get(Module, lesson.module_id)
+            if module:
+                course = db.get(Course, module.course_id)
+                if course and course.instructor_id != current_user.id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Sadece kendi kursunuzdaki yorumlara cevap verebilirsiniz.",
+                    )
+
+    now = datetime.now()
+    reply = LessonComment(
+        id=uuid4(),
+        lesson_id=parent.lesson_id,
+        user_id=current_user.id,
+        parent_comment_id=parent.id,
+        content=body.content,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(reply)
+    db.commit()
+
+    return {
+        "success": True,
+        "id": str(reply.id),
+        "content": reply.content,
+        "authorName": current_user.full_name,
+        "authorRole": current_user.role,
+        "isInstructorReply": current_user.role == "instructor",
+        "createdAt": now.isoformat(),
+    }
+
+
+@comment_router.delete(
+    "/{comment_id}",
+    status_code=200,
+    summary="Yorum Sil (2.5)",
+)
+def delete_comment(
+    comment_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        comment_uuid = UUID(comment_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Yorum bulunamadı.")
+
+    comment = db.get(LessonComment, comment_uuid)
+    if comment is None:
+        raise HTTPException(status_code=404, detail="Yorum bulunamadı.")
+
+    # Kendi yorumu, eğitmen (kendi kursu) veya admin silebilir
+    if current_user.role == "student" and comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Bu yorumu silemezsiniz.")
+    if current_user.role == "instructor":
+        if comment.user_id != current_user.id:
+            # Kendi kursundaki yorum mu?
+            lesson = db.get(Lesson, comment.lesson_id)
+            if lesson:
+                module = db.get(Module, lesson.module_id)
+                if module:
+                    course = db.get(Course, module.course_id)
+                    if course and course.instructor_id != current_user.id:
+                        raise HTTPException(status_code=403, detail="Bu yorumu silemezsiniz.")
+
+    # Cevapları da sil (CASCADE olmasına rağmen explicit)
+    replies = db.scalars(
+        select(LessonComment).where(LessonComment.parent_comment_id == comment_uuid)
+    ).all()
+    for r in replies:
+        db.delete(r)
+    db.delete(comment)
+    db.commit()
+    return {"success": True, "message": "Yorum silindi."}
+
+
+# ---------------------------------------------------------------------------
+# review_router — /courses prefix altına eklenecek (router içinde)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{course_id}/rating-summary",
+    summary="Kurs Rating Özeti (2.5)",
+)
+def course_rating_summary(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        course_uuid = UUID(course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    from sqlalchemy import func as sqlfunc
+    row = db.execute(
+        select(
+            sqlfunc.avg(CourseReview.rating).label("avg_rating"),
+            sqlfunc.count(CourseReview.id).label("review_count"),
+        ).where(CourseReview.course_id == course_uuid)
+    ).one()
+
+    return {
+        "avgRating": round(float(row.avg_rating), 1) if row.avg_rating else 0.0,
+        "reviewCount": row.review_count or 0,
+    }
+
+
+@router.get(
+    "/{course_id}/reviews",
+    summary="Kurs Değerlendirme Listesi (2.5)",
+)
+def list_reviews(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    try:
+        course_uuid = UUID(course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    rows = db.execute(
+        select(CourseReview, User)
+        .join(User, CourseReview.user_id == User.id)
+        .where(CourseReview.course_id == course_uuid)
+        .order_by(CourseReview.created_at.desc())
+    ).all()
+
+    return [
+        {
+            "id": str(review.id),
+            "rating": review.rating,
+            "reviewText": review.review_text or "",
+            "authorName": user.full_name,
+            "isOwn": str(review.user_id) == str(current_user.id),
+            "createdAt": review.created_at.isoformat(),
+        }
+        for review, user in rows
+    ]
+
+
+@router.get(
+    "/{course_id}/reviews/my",
+    summary="Benim Değerlendirmem (2.5)",
+)
+def my_review(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        course_uuid = UUID(course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    review = db.scalar(
+        select(CourseReview).where(
+            CourseReview.course_id == course_uuid,
+            CourseReview.user_id == current_user.id,
+        )
+    )
+    if review is None:
+        return {"exists": False}
+
+    return {
+        "exists": True,
+        "id": str(review.id),
+        "rating": review.rating,
+        "reviewText": review.review_text or "",
+        "createdAt": review.created_at.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /instructor/courses/{course_id}/comments — Eğitmen Kurs Yorumları (2.5)
+# ---------------------------------------------------------------------------
+
+@content_router.get("/instructor/courses/{course_id}/comments")
+def instructor_course_comments(
+    course_id: str = Path(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _require_role(current_user, "instructor", "admin")
+    try:
+        course_uuid = UUID(course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+
+    course = db.get(Course, course_uuid)
+    if course is None:
+        raise HTTPException(status_code=404, detail="Kurs bulunamadı.")
+    if current_user.role == "instructor":
+        _require_owner_or_admin(course, current_user)
+
+    # Kursun tüm derslerini bul
+    modules = db.scalars(select(Module).where(Module.course_id == course_uuid)).all()
+    lesson_ids = []
+    for mod in modules:
+        lessons = db.scalars(select(Lesson).where(Lesson.module_id == mod.id)).all()
+        lesson_ids.extend([l.id for l in lessons])
+
+    if not lesson_ids:
+        return {"total": 0, "comments": []}
+
+    # Ana yorumları çek
+    comments = db.scalars(
+        select(LessonComment)
+        .where(
+            LessonComment.lesson_id.in_(lesson_ids),
+            LessonComment.parent_comment_id.is_(None),
+        )
+        .order_by(LessonComment.created_at.desc())
+    ).all()
+
+    result = []
+    for comment in comments:
+        author = db.get(User, comment.user_id)
+        lesson = db.get(Lesson, comment.lesson_id)
+        replies = db.scalars(
+            select(LessonComment)
+            .where(LessonComment.parent_comment_id == comment.id)
+            .order_by(LessonComment.created_at.asc())
+        ).all()
+
+        reply_list = []
+        for reply in replies:
+            reply_author = db.get(User, reply.user_id)
+            reply_list.append({
+                "id": str(reply.id),
+                "content": reply.content,
+                "authorName": reply_author.full_name if reply_author else "Kullanıcı",
+                "authorRole": reply_author.role if reply_author else "student",
+                "isInstructorReply": (reply_author.role == "instructor") if reply_author else False,
+                "createdAt": reply.created_at.isoformat(),
+            })
+
+        result.append({
+            "id": str(comment.id),
+            "content": comment.content,
+            "authorName": author.full_name if author else "Kullanıcı",
+            "authorRole": author.role if author else "student",
+            "lessonTitle": lesson.title if lesson else "?",
+            "createdAt": comment.created_at.isoformat(),
+            "replies": reply_list,
+        })
+
+    return {"total": len(result), "comments": result}

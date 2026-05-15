@@ -264,3 +264,50 @@ class Certificate(Base):
 
     user: Mapped[User] = relationship(back_populates="certificates")
     course: Mapped[Course] = relationship(back_populates="certificates")
+
+
+# ---------------------------------------------------------------------------
+# 2.5: Ders Yorumları (lesson_comments tablosu)
+# parent_comment_id NULL  → ana yorum
+# parent_comment_id dolu  → cevap (eğitmen cevabı dahil)
+# ---------------------------------------------------------------------------
+
+class LessonComment(Base):
+    __tablename__ = "lesson_comments"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    lesson_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("lessons.id"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    parent_comment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("lesson_comments.id"),
+        nullable=True,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# 2.5: Kurs Değerlendirmeleri (course_reviews tablosu)
+# UNIQUE(user_id, course_id) — aynı kursa tek review
+# ---------------------------------------------------------------------------
+
+class CourseReview(Base):
+    __tablename__ = "course_reviews"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    course_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("courses.id"), nullable=False
+    )
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    review_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

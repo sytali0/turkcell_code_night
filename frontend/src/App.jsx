@@ -6,20 +6,26 @@ import Navbar from './components/layout/Navbar';
 import PrivateRoute from './components/layout/PrivateRoute';
 
 // Lazy-load pages for code splitting
-const LoginPage         = lazy(() => import('./pages/LoginPage'));
-const CourseCatalogPage = lazy(() => import('./pages/CourseCatalogPage'));
-const CourseDetailPage  = lazy(() => import('./pages/CourseDetailPage'));
-const MyCoursesPage     = lazy(() => import('./pages/MyCoursesPage'));
-const CourseManagementPage = lazy(() => import('./pages/CourseManagementPage'));
-const CourseFormPage    = lazy(() => import('./pages/CourseFormPage'));
+const LoginPage              = lazy(() => import('./pages/LoginPage'));
+const CourseCatalogPage      = lazy(() => import('./pages/CourseCatalogPage'));
+const CourseDetailPage       = lazy(() => import('./pages/CourseDetailPage'));
+const MyCoursesPage          = lazy(() => import('./pages/MyCoursesPage'));
+const CourseManagementPage   = lazy(() => import('./pages/CourseManagementPage'));
+const CourseFormPage         = lazy(() => import('./pages/CourseFormPage'));
 const CourseContentManagePage = lazy(() => import('./pages/CourseContentManagePage'));
-const ExamManagePage    = lazy(() => import('./pages/ExamManagePage'));
-const ExamQuestionsPage = lazy(() => import('./pages/ExamQuestionsPage'));
-const AdminExamsPage    = lazy(() => import('./pages/AdminExamsPage'));
-const LessonViewPage    = lazy(() => import('./pages/LessonViewPage'));
-const ExamPage          = lazy(() => import('./pages/ExamPage'));
-const ExamResultPage    = lazy(() => import('./pages/ExamResultPage'));
-const ProfilePage       = lazy(() => import('./pages/ProfilePage'));
+const ExamManagePage         = lazy(() => import('./pages/ExamManagePage'));
+const ExamQuestionsPage      = lazy(() => import('./pages/ExamQuestionsPage'));
+const AdminExamsPage         = lazy(() => import('./pages/AdminExamsPage'));
+const LessonViewPage         = lazy(() => import('./pages/LessonViewPage'));
+const ExamPage               = lazy(() => import('./pages/ExamPage'));
+const ExamResultPage         = lazy(() => import('./pages/ExamResultPage'));
+const ProfilePage            = lazy(() => import('./pages/ProfilePage'));
+
+// ── 2.4 İlerleme & Sertifika sayfaları ───────────────────────────────────
+const CertificatesPage       = lazy(() => import('./pages/CertificatesPage'));
+const CertificateDetailPage  = lazy(() => import('./pages/CertificateDetailPage'));
+const VerifyCertificatePage  = lazy(() => import('./pages/VerifyCertificatePage'));
+const AdminCertificatesPage  = lazy(() => import('./pages/AdminCertificatesPage'));
 
 // Full-screen loading fallback
 function PageLoader() {
@@ -56,10 +62,13 @@ export default function App() {
           <Navbar />
           <Suspense fallback={<PageLoader />}>
             <Routes>
-              {/* Public */}
+              {/* ── Public ──────────────────────────────────────────────── */}
               <Route path="/login" element={<LoginPage />} />
 
-              {/* Protected */}
+              {/* 2.4: Public sertifika doğrulama — PrivateRoute dışında */}
+              <Route path="/verify-certificate" element={<VerifyCertificatePage />} />
+
+              {/* ── Protected ───────────────────────────────────────────── */}
               <Route
                 path="/"
                 element={
@@ -100,6 +109,26 @@ export default function App() {
                   </PrivateRoute>
                 }
               />
+
+              {/* ── 2.4: Sertifika sayfaları (student) ───────────────── */}
+              <Route
+                path="/certificates"
+                element={
+                  <PrivateRoute allowedRoles={['student']}>
+                    <CertificatesPage />
+                  </PrivateRoute>
+                }
+              />
+              <Route
+                path="/certificates/:certificateNumber"
+                element={
+                  <PrivateRoute allowedRoles={['student']}>
+                    <CertificateDetailPage />
+                  </PrivateRoute>
+                }
+              />
+
+              {/* ── Instructor ──────────────────────────────────────────── */}
               <Route
                 path="/instructor/courses"
                 element={
@@ -156,6 +185,8 @@ export default function App() {
                   </PrivateRoute>
                 }
               />
+
+              {/* ── Admin ──────────────────────────────────────────────── */}
               <Route
                 path="/admin/courses"
                 element={
@@ -180,6 +211,17 @@ export default function App() {
                   </PrivateRoute>
                 }
               />
+              {/* 2.4: Admin sertifika yönetimi */}
+              <Route
+                path="/admin/certificates"
+                element={
+                  <PrivateRoute allowedRoles={['admin']}>
+                    <AdminCertificatesPage />
+                  </PrivateRoute>
+                }
+              />
+
+              {/* ── Exam ───────────────────────────────────────────────── */}
               <Route
                 path="/exams/:examId"
                 element={

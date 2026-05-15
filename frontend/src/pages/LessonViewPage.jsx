@@ -5,7 +5,8 @@ import {
   CheckCircle2, Play, Lock, Send, MessageSquare, Trophy, ArrowLeft,
   Clock, AlertCircle, Loader2, ChevronLeft, ChevronRight as ChevronRightIcon,
 } from 'lucide-react';
-import { courseAPI, lessonAPI } from '../api/axios';
+import { courseAPI, lessonAPI, progressAPI, commentAPI } from '../api/axios';
+import { useAuth } from '../context/AuthContext';
 
 const LESSON_ICON = { video: Video, reading: FileText, quiz: FlaskConical, lab: FlaskConical };
 
@@ -200,53 +201,159 @@ function LessonContent({ lesson, onComplete, completing, completed }) {
   );
 }
 
-function CommentSection({ lessonId }) {
+function StarBadge({ role }) {
+  const labels = { student: 'Öğrenci', instructor: 'Eğitmen', admin: 'Admin' };
+  const colors = { student: 'rgba(255,209,0,0.15)', instructor: 'rgba(99,102,241,0.2)', admin: 'rgba(239,68,68,0.15)' };
+  const textColors = { student: 'var(--tc-yellow)', instructor: '#A78BFA', admin: '#F87171' };
+  return (
+    <span style={{ fontSize: '0.65rem', fontWeight: 700, padding: '2px 8px', borderRadius: '6px',
+      background: colors[role] || 'rgba(255,255,255,0.08)', color: textColors[role] || 'var(--tc-muted)' }}>
+      {labels[role] || role}
+    </span>
+  );
+}
+
+function CommentSection({ lessonId, userRole }) {
+  const [comments, setComments] = useState([]);
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [replyContent, setReplyContent] = useState({});
+  const [replyOpen, setReplyOpen] = useState({});
   const [error, setError] = useState('');
+
+  const loadComments = () => {
+    commentAPI.list(lessonId).then(r => setComments(r.data || [])).catch(() => {});
+  };
+
+  useEffect(() => { if (lessonId) loadComments(); }, [lessonId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!content.trim()) return;
     setSending(true); setError('');
     try {
-      await lessonAPI.comment(lessonId, { content });
-      setSent(true); setContent('');
-      setTimeout(() => setSent(false), 3000);
+      await commentAPI.add(lessonId, { content });
+      setContent(''); loadComments();
     } catch (err) {
       setError(err.response?.data?.detail || 'Yorum gönderilemedi.');
     } finally { setSending(false); }
   };
 
+  const handleReply = async (commentId) => {
+    const txt = replyContent[commentId] || '';
+    if (!txt.trim()) return;
+    try {
+      await commentAPI.reply(commentId, { content: txt });
+      setReplyContent(p => ({ ...p, [commentId]: '' }));
+      setReplyOpen(p => ({ ...p, [commentId]: false }));
+      loadComments();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Cevap gönderilemedi.');
+    }
+  };
+
+  const handleDelete = async (commentId) => {
+    if (!window.confirm('Yorumu silmek istiyor musunuz?')) return;
+    try { await commentAPI.delete(commentId); loadComments(); }
+    catch (err) { setError(err.response?.data?.detail || 'Silinemedi.'); }
+  };
+
+  const fmtDate = (iso) => new Date(iso).toLocaleDateString('tr-TR', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+
   return (
     <div className="card" style={{ padding: '1.5rem' }}>
-      <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--tc-text)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+      <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--tc-text)', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
         <MessageSquare size={18} color="var(--tc-yellow)" /> Yorumlar
+        {comments.length > 0 && <span style={{ fontSize: '0.75rem', background: 'var(--tc-yellow)', color: 'var(--tc-navy)', borderRadius: '999px', padding: '1px 8px', fontWeight: 700 }}>{comments.length}</span>}
       </h3>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-        <textarea
-          className="input-field"
-          style={{ minHeight: '100px', resize: 'vertical', fontFamily: 'inherit' }}
-          placeholder="Bu ders hakkında düşüncelerinizi paylaşın…"
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-        />
-        {error && <p style={{ fontSize: '0.8rem', color: '#F87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}><AlertCircle size={13} />{error}</p>}
-        {sent && <p style={{ fontSize: '0.8rem', color: '#4ADE80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}><CheckCircle2 size={13} />Yorumunuz gönderildi!</p>}
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button type="submit" className="btn-primary" disabled={sending || !content.trim()} style={{ fontSize: '0.85rem' }}>
-            {sending ? <Loader2 size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> : <Send size={15} />}
-            Gönder
-          </button>
+
+      {/* Yorum listesi */}
+      {comments.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+          {comments.map(c => (
+            <div key={c.id} style={{ border: '1px solid var(--tc-border)', borderRadius: '12px', overflow: 'hidden' }}>
+              {/* Ana yorum */}
+              <div style={{ padding: '1rem', background: 'rgba(255,255,255,0.02)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <div style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'var(--tc-navy-lt)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--tc-yellow)' }}>{c.authorName?.[0]?.toUpperCase() || '?'}</span>
+                    </div>
+                    <div>
+                      <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--tc-text)' }}>{c.authorName}</span>
+                      <span style={{ marginLeft: '0.4rem' }}><StarBadge role={c.authorRole} /></span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--tc-muted)' }}>{fmtDate(c.createdAt)}</span>
+                    {c.isOwn && (
+                      <button onClick={() => handleDelete(c.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#F87171', fontSize: '0.7rem', padding: '2px 6px', borderRadius: '6px' }} title="Sil">✕</button>
+                    )}
+                  </div>
+                </div>
+                <p style={{ fontSize: '0.875rem', color: 'var(--tc-text)', lineHeight: 1.6, margin: 0 }}>{c.content}</p>
+                {/* Eğitmen cevapla butonu */}
+                {userRole === 'instructor' && c.replies?.length === 0 && (
+                  <button onClick={() => setReplyOpen(p => ({ ...p, [c.id]: !p[c.id] }))}
+                    style={{ marginTop: '0.5rem', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--tc-yellow)', fontWeight: 600 }}>
+                    {replyOpen[c.id] ? 'İptal' : '↳ Cevapla'}
+                  </button>
+                )}
+              </div>
+
+              {/* Cevap formu — eğitmen */}
+              {userRole === 'instructor' && replyOpen[c.id] && (
+                <div style={{ padding: '0.75rem 1rem', background: 'rgba(99,102,241,0.05)', borderTop: '1px solid var(--tc-border)', display: 'flex', gap: '0.5rem' }}>
+                  <input className="input-field" style={{ flex: 1, fontSize: '0.85rem' }} placeholder="Cevabınızı yazın…"
+                    value={replyContent[c.id] || ''} onChange={e => setReplyContent(p => ({ ...p, [c.id]: e.target.value }))} />
+                  <button className="btn-primary" style={{ fontSize: '0.8rem', padding: '0.4rem 0.9rem' }} onClick={() => handleReply(c.id)}>
+                    Gönder
+                  </button>
+                </div>
+              )}
+
+              {/* Cevaplar */}
+              {c.replies?.map(r => (
+                <div key={r.id} style={{ padding: '0.85rem 1rem 0.85rem 1.75rem', background: r.isInstructorReply ? 'rgba(99,102,241,0.06)' : 'rgba(255,255,255,0.01)', borderTop: '1px solid var(--tc-border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                    {r.isInstructorReply && (
+                      <span style={{ fontSize: '0.65rem', fontWeight: 700, background: 'rgba(99,102,241,0.25)', color: '#A78BFA', borderRadius: '6px', padding: '2px 7px' }}>👨‍🏫 Eğitmen Cevabı</span>
+                    )}
+                    <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--tc-text)' }}>{r.authorName}</span>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--tc-muted)', marginLeft: 'auto' }}>{fmtDate(r.createdAt)}</span>
+                  </div>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--tc-text)', margin: 0, lineHeight: 1.5 }}>{r.content}</p>
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
-      </form>
+      )}
+
+      {/* Yorum ekleme formu — student ve instructor */}
+      {(userRole === 'student' || userRole === 'instructor') && (
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <textarea className="input-field" style={{ minHeight: '90px', resize: 'vertical', fontFamily: 'inherit', fontSize: '0.875rem' }}
+            placeholder="Bu ders hakkında soru veya yorum yaz…" value={content} onChange={e => setContent(e.target.value)} />
+          {error && <p style={{ fontSize: '0.8rem', color: '#F87171' }}>{error}</p>}
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button type="submit" className="btn-primary" disabled={sending || !content.trim()} style={{ fontSize: '0.85rem' }}>
+              {sending ? <Loader2 size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> : <Send size={15} />} Gönder
+            </button>
+          </div>
+        </form>
+      )}
+
+      {comments.length === 0 && userRole !== 'student' && userRole !== 'instructor' && (
+        <p style={{ color: 'var(--tc-muted)', fontSize: '0.875rem', textAlign: 'center' }}>Henüz yorum yok.</p>
+      )}
     </div>
   );
 }
 
 export default function LessonViewPage() {
   const { courseId } = useParams();
+  const { user } = useAuth();
   const navigate = useNavigate();
 
   const [curriculum, setCurriculum] = useState(null);
@@ -273,6 +380,21 @@ export default function LessonViewPage() {
         setLoading(false);
       }
     })();
+  }, [courseId]);
+
+  // 2.4: Tamamlanan dersleri progress'ten yukle (sayfa yenilemede sifirlanmasin)
+  useEffect(() => {
+    if (!courseId) return;
+    progressAPI.courseProgress(courseId)
+      .then((res) => {
+        const modules = res.data?.modules || [];
+        const ids = new Set();
+        modules.forEach((mod) => {
+          (mod.completed_lesson_ids || []).forEach((id) => ids.add(id));
+        });
+        if (ids.size > 0) setCompletedIds(ids);
+      })
+      .catch(() => {});
   }, [courseId]);
 
   const handleSelectLesson = (lesson, mod) => {
@@ -403,7 +525,7 @@ export default function LessonViewPage() {
                 </div>
               )}
 
-              <CommentSection lessonId={activeLesson.id} />
+              <CommentSection lessonId={activeLesson.id} userRole={user?.role} />
             </>
           ) : (
             <div style={{ textAlign: 'center', padding: '3rem' }}>
