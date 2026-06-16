@@ -1,4 +1,4 @@
-This project was carried out physically with teamwork for the competition within the scope of the 2026 Turkcell codenight event.
+This project was carried out physically with teamwork for the competition within the scope of the 2026 Turkcell codenight event. [Turkcell](https://turkcell.com.tr)
 
 (Bu proje 2026 Turkcell codenight etkinliği kapsamında yarışma için fiziksel olarak takım çalışması ile yapılmıştır.)
 EN:
